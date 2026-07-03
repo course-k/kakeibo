@@ -1,11 +1,11 @@
 {
   "expo": {
-    "name": "kakeibo-scaffold",
-    "slug": "kakeibo-scaffold",
+    "name": "kakeibo",
+    "slug": "kakeibo",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "kakeiboscaffold",
+    "scheme": "kakeibo",
     "userInterfaceStyle": "automatic",
     "ios": {
       "icon": "./assets/expo.icon"
