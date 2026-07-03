@@ -39,8 +39,5 @@ yarn-error.*
 /ios
 /android
 
-# drizzle
-drizzle/meta/
-
 # test
 coverage/
