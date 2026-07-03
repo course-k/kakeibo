@@ -1,7 +1,7 @@
 // 取引の妥当性検証。type ごとの from/to 制約（spec §2.1）と金額制約（不変条件 1・2）を検証する。
 // 参照: lab/docs/design/kakeibo-v1-spec.md §2.1 取引タイプと口座の動き / §2.3 不変条件 1・2
 import { isValidAmount } from "./amount";
-import type { Account, AccountType, Transaction, TransactionType } from "./types";
+import type { Account, AccountType, Card, Transaction, TransactionType } from "./types";
 
 export type ValidationErrorReason =
   | "invalid_amount"
@@ -13,7 +13,9 @@ export type ValidationErrorReason =
   | "to_account_not_found"
   | "invalid_from_account_type"
   | "invalid_to_account_type"
-  | "invalid_adjustment_accounts";
+  | "invalid_adjustment_accounts"
+  | "card_not_found"
+  | "card_settlement_mismatch";
 
 export type ValidationResult =
   | { ok: true }
@@ -54,10 +56,30 @@ function checkNoTo(tx: Ctx): ValidationResult {
   return { ok: true };
 }
 
+/**
+ * expense_card/card_debit の cardId が実在する Card を指し、かつその Card の
+ * settlementAccountId が取引の決済口座側（settlementAccountId）と一致することを検証する。
+ * cardId が未設定（null/undefined）の場合はカード紐付けなしとして検証をスキップする。
+ */
+function checkCardLink(
+  cardId: string | null | undefined,
+  settlementAccountId: string | null,
+  cards: Card[]
+): ValidationResult {
+  if (cardId === null || cardId === undefined) return { ok: true };
+  const card = cards.find((c) => c.id === cardId);
+  if (!card) return { ok: false, reason: "card_not_found" };
+  if (card.settlementAccountId !== settlementAccountId) {
+    return { ok: false, reason: "card_settlement_mismatch" };
+  }
+  return { ok: true };
+}
+
 function validateByType(
   type: TransactionType,
-  tx: Ctx,
-  accounts: Account[]
+  tx: Ctx & { cardId?: Transaction["cardId"] },
+  accounts: Account[],
+  cards: Card[]
 ): ValidationResult {
   switch (type) {
     case "income": {
@@ -76,7 +98,9 @@ function validateByType(
       // from: budget / to: card_settlement
       const from = checkFrom(tx, accounts, "budget");
       if (!from.ok) return from;
-      return checkTo(tx, accounts, "card_settlement");
+      const to = checkTo(tx, accounts, "card_settlement");
+      if (!to.ok) return to;
+      return checkCardLink(tx.cardId, tx.toAccountId, cards);
     }
     case "transfer": {
       // from: budget / to: budget
@@ -88,7 +112,9 @@ function validateByType(
       // from: card_settlement / to: 外部（null）
       const from = checkFrom(tx, accounts, "card_settlement");
       if (!from.ok) return from;
-      return checkNoTo(tx);
+      const noTo = checkNoTo(tx);
+      if (!noTo.ok) return noTo;
+      return checkCardLink(tx.cardId, tx.fromAccountId, cards);
     }
     case "adjustment": {
       // どちらか片側のみ（both も neither も不可）。口座種別は問わない。
@@ -107,13 +133,17 @@ function validateByType(
 }
 
 /**
- * 取引を検証する。金額（不変条件 1）と type ごとの from/to 制約（不変条件 2）を満たさない場合、
- * ok: false と理由を返す。
+ * 取引を検証する。金額（不変条件 1）と type ごとの from/to 制約（不変条件 2）に加え、
+ * expense_card/card_debit の cardId が実在するカードの決済口座と一致することを検証する。
+ * ok: false の場合は理由を返す。
  */
 export function validateTransaction(
-  tx: Pick<Transaction, "amount" | "type" | "fromAccountId" | "toAccountId">,
-  accounts: Account[]
+  tx: Pick<Transaction, "amount" | "type" | "fromAccountId" | "toAccountId"> & {
+    cardId?: Transaction["cardId"];
+  },
+  accounts: Account[],
+  cards: Card[]
 ): ValidationResult {
   if (!isValidAmount(tx.amount)) return { ok: false, reason: "invalid_amount" };
-  return validateByType(tx.type, tx, accounts);
+  return validateByType(tx.type, tx, accounts, cards);
 }

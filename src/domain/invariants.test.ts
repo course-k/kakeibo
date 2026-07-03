@@ -19,7 +19,8 @@ describe("不変条件 1: 金額は常に正の整数円。ゼロ・負・小数
     const budget = makeAccount({ id: "budget-1", type: "budget" });
     const result = validateTransaction(
       { amount: 0, type: "income", fromAccountId: null, toAccountId: budget.id },
-      [budget]
+      [budget],
+      []
     );
     expect(result.ok).toBe(false);
   });
@@ -40,7 +41,11 @@ describe("不変条件 2: type ごとの from/to 必須制約に反する取引�
     ["card_debit", "settlement-1", null, true],
     ["card_debit", "budget-1", null, false],
   ] as const)("%s (from=%s, to=%s) -> ok=%s", (type, fromAccountId, toAccountId, expected) => {
-    const result = validateTransaction({ amount: 100, type, fromAccountId, toAccountId }, accounts);
+    const result = validateTransaction(
+      { amount: 100, type, fromAccountId, toAccountId },
+      accounts,
+      []
+    );
     expect(result.ok).toBe(expected);
   });
 });
