@@ -20,4 +20,9 @@ describe("isValidAmount", () => {
     expect(isValidAmount(NaN)).toBe(false);
     expect(isValidAmount(Infinity)).toBe(false);
   });
+
+  it("Number.MAX_SAFE_INTEGER 以下は妥当、超える値は不正とする", () => {
+    expect(isValidAmount(Number.MAX_SAFE_INTEGER)).toBe(true);
+    expect(isValidAmount(Number.MAX_SAFE_INTEGER + 1)).toBe(false);
+  });
 });
