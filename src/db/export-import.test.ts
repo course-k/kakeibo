@@ -6,7 +6,7 @@ import { createNodeDatabase } from "./client";
 import BetterSqlite3 from "better-sqlite3";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import path from "node:path";
-import { exportData, importData } from "./export-import";
+import { EXPORT_SCHEMA_VERSION, exportData, importData, type ExportedData } from "./export-import";
 import { insertRecurringRule } from "./recurring-rules-repository";
 import { createTestDb } from "./test-utils";
 import { insertTransaction, softDeleteTransaction } from "./transactions-repository";
@@ -112,9 +112,119 @@ describe("export-import 往復一致（不変条件6）", () => {
 
     // archivedBudget も往復で保持されている（アーカイブは論理削除ではないため）。
     expect(secondExport.accounts.some((a) => a.id === archivedBudget.id)).toBe(true);
-    // 送出時点の全件数の確認（4 accounts / 1 card / 2 transactions（削除済み除く）/ 1 recurring rule）。
+    // 送出時点の全件数の確認（3 accounts / 1 card / 2 transactions（削除済み除く）/ 1 recurring rule）。
     expect(secondExport.accounts).toHaveLength(3);
     expect(secondExport.transactions).toHaveLength(2);
     expect(secondExport.transactions.map((t) => t.id)).toContain(spend.id);
+  });
+
+  it("importData は取り込み境界で date / archivedAt をゼロ埋め正規化する（項目2の穴を突くケース）", async () => {
+    const db = createTestDb();
+    const budget = await insertAccount(db, {
+      name: "生活費",
+      type: "budget",
+      monthlyBudget: 0,
+      ownerId: null,
+      sortOrder: 0,
+      archivedAt: null,
+    });
+
+    // アプリ外で加工された（またはバグで非ゼロ埋めのまま出力された）ExportedData を想定。
+    const denormalized: ExportedData = {
+      schemaVersion: EXPORT_SCHEMA_VERSION,
+      exportedAt: new Date().toISOString(),
+      accounts: [
+        {
+          id: budget.id,
+          name: budget.name,
+          type: budget.type,
+          monthlyBudget: budget.monthlyBudget,
+          ownerId: budget.ownerId,
+          sortOrder: budget.sortOrder,
+          archivedAt: "2026-7-3",
+          createdAt: budget.createdAt,
+          updatedAt: budget.updatedAt,
+        },
+      ],
+      cards: [],
+      transactions: [
+        {
+          id: "tx-denormalized",
+          date: "2026-7-3",
+          amount: 1000,
+          type: "income",
+          fromAccountId: null,
+          toAccountId: budget.id,
+          cardId: null,
+          memo: "",
+          recurringRuleId: null,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          deletedAt: null,
+        },
+      ],
+      recurringRules: [],
+    };
+
+    await importData(db, denormalized);
+    const exported = await exportData(db);
+
+    expect(exported.accounts[0].archivedAt).toBe("2026-07-03");
+    expect(exported.transactions[0].date).toBe("2026-07-03");
+  });
+
+  it("項目1の回帰: importData が途中で失敗しても既存データは保持される（原子性）", async () => {
+    const db = createTestDb();
+    const budget = await insertAccount(db, {
+      name: "生活費",
+      type: "budget",
+      monthlyBudget: 50000,
+      ownerId: null,
+      sortOrder: 0,
+      archivedAt: null,
+    });
+    await insertTransaction(db, {
+      date: "2026-01-01",
+      amount: 1000,
+      type: "income",
+      fromAccountId: null,
+      toAccountId: budget.id,
+      cardId: null,
+      memo: "既存データ",
+      recurringRuleId: null,
+    });
+
+    const beforeFailure = await exportData(db);
+    expect(beforeFailure.accounts).toHaveLength(1);
+    expect(beforeFailure.transactions).toHaveLength(1);
+
+    // accounts.name は NOT NULL 制約なので、この insert は DB レベルで例外を投げる。
+    const broken: ExportedData = {
+      schemaVersion: EXPORT_SCHEMA_VERSION,
+      exportedAt: new Date().toISOString(),
+      accounts: [
+        {
+          id: "broken-account",
+          name: null as unknown as string,
+          type: "budget",
+          monthlyBudget: 0,
+          ownerId: null,
+          sortOrder: 0,
+          archivedAt: null,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+      ],
+      cards: [],
+      transactions: [],
+      recurringRules: [],
+    };
+
+    await expect(importData(db, broken)).rejects.toThrow();
+
+    // ロールバックにより、削除前の既存データがそのまま残っていること。
+    const afterFailure = await exportData(db);
+    expect(afterFailure.accounts).toEqual(beforeFailure.accounts);
+    expect(afterFailure.transactions).toEqual(beforeFailure.transactions);
   });
 });

@@ -2,7 +2,7 @@
 // 保存前に validateTransaction（不変条件 1・2）を通す。論理削除（deleted_at）済みの
 // 取引はデフォルトのクエリから常に除外する（不変条件 5）。
 // 参照: lab/docs/design/kakeibo-v1-spec.md §2.1 transactions / §2.3 不変条件 1・2・5
-import { and, eq, isNull } from "drizzle-orm";
+import { and, asc, eq, isNull } from "drizzle-orm";
 import { validateTransaction } from "../domain/validate-transaction";
 import type { Transaction } from "../domain/types";
 import { listAccounts } from "./accounts-repository";
@@ -86,6 +86,9 @@ export async function updateTransaction(
 ): Promise<Transaction> {
   const existing = await getTransactionRowById(db, id);
   if (!existing) throw new Error(`transaction not found: ${id}`);
+  if (existing.deletedAt !== null) {
+    throw new Error(`transaction is deleted: ${id}`);
+  }
   const merged: Pick<Transaction, "amount" | "type" | "fromAccountId" | "toAccountId" | "cardId"> = {
     amount: patch.amount ?? existing.amount,
     type: (patch.type ?? existing.type) as Transaction["type"],
@@ -107,6 +110,8 @@ export async function updateTransaction(
 
 /** 論理削除。deleted_at をセットするのみで物理削除はしない（不変条件 5・同期/復元への備え）。 */
 export async function softDeleteTransaction(db: AppDatabase, id: string): Promise<void> {
+  const existing = await getTransactionRowById(db, id);
+  if (!existing) throw new Error(`transaction not found: ${id}`);
   const now = new Date().toISOString();
   await db.update(transactions).set({ deletedAt: now, updatedAt: now }).where(eq(transactions.id, id));
 }
@@ -143,10 +148,17 @@ export async function listTransactions(
   options: { includeDeleted?: boolean } = {}
 ): Promise<Transaction[]> {
   if (options.includeDeleted) {
-    const rows = await db.select().from(transactions);
+    const rows = await db
+      .select()
+      .from(transactions)
+      .orderBy(asc(transactions.date), asc(transactions.id));
     return rows.map(toDomain);
   }
-  const rows = await db.select().from(transactions).where(isNull(transactions.deletedAt));
+  const rows = await db
+    .select()
+    .from(transactions)
+    .where(isNull(transactions.deletedAt))
+    .orderBy(asc(transactions.date), asc(transactions.id));
   return rows.map(toDomain);
 }
 
