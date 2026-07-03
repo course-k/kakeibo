@@ -64,8 +64,8 @@ describe("summarizeMonthlyBudgetExpenses", () => {
     ]);
 
     expect(summary.byAccount).toEqual([
-      { month: "2026-07", accountId: "daily", accountName: "日用品", amount: 500 },
       { month: "2026-07", accountId: "food", accountName: "食費", amount: 3000 },
+      { month: "2026-07", accountId: "daily", accountName: "日用品", amount: 500 },
       { month: "2026-08", accountId: "food", accountName: "食費", amount: 700 },
     ]);
     expect(summary.monthlyTrend).toEqual([

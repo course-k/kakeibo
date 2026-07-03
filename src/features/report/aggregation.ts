@@ -7,6 +7,10 @@ export type AccountMonthlyExpense = {
   amount: number;
 };
 
+type AccountMonthlyExpenseAccumulator = AccountMonthlyExpense & {
+  accountSortOrder: number;
+};
+
 export type MonthlyTrend = {
   month: YearMonth;
   amount: number;
@@ -31,7 +35,7 @@ export function summarizeMonthlyBudgetExpenses(
 ): ReportSummary {
   const budgetAccounts = accounts.filter((account) => account.type === "budget");
   const accountById = new Map(budgetAccounts.map((account) => [account.id, account]));
-  const byAccountMap = new Map<string, AccountMonthlyExpense>();
+  const byAccountMap = new Map<string, AccountMonthlyExpenseAccumulator>();
   const trendMap = new Map<YearMonth, number>();
 
   for (const tx of transactions) {
@@ -44,6 +48,7 @@ export function summarizeMonthlyBudgetExpenses(
     const current = byAccountMap.get(key) ?? {
       accountId: account.id,
       accountName: account.name,
+      accountSortOrder: account.sortOrder,
       month,
       amount: 0,
     };
@@ -53,9 +58,14 @@ export function summarizeMonthlyBudgetExpenses(
   }
 
   return {
-    byAccount: Array.from(byAccountMap.values()).sort(
-      (a, b) => a.month.localeCompare(b.month) || a.accountName.localeCompare(b.accountName)
-    ),
+    byAccount: Array.from(byAccountMap.values())
+      .sort(
+        (a, b) =>
+          a.month.localeCompare(b.month) ||
+          a.accountSortOrder - b.accountSortOrder ||
+          a.accountId.localeCompare(b.accountId)
+      )
+      .map(({ accountSortOrder: _accountSortOrder, ...expense }) => expense),
     monthlyTrend: Array.from(trendMap.entries())
       .map(([month, amount]) => ({ month, amount }))
       .sort((a, b) => a.month.localeCompare(b.month)),
