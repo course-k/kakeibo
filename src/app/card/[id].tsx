@@ -72,7 +72,7 @@ export default function CardDetailScreen() {
       }
       const statement = deriveCardStatement(card, transactions, todayIsoDate());
       setState({ status: "ready", card, statement });
-      setPaidAmountText(String(statement.currentAmount));
+      setPaidAmountText(String(Math.max(statement.currentAmount, 0)));
     } catch (error) {
       setState({ status: "error", message: error instanceof Error ? error.message : String(error) });
     }
@@ -95,14 +95,10 @@ export default function CardDetailScreen() {
     try {
       const built = buildCardSettlementTransactions({
         card: state.card,
-        currentAmount: state.statement.currentAmount,
         paidAmount,
         date: todayIsoDate(),
       });
-      await insertTransaction(db, built.cardDebit);
-      if (built.adjustment) {
-        await insertTransaction(db, built.adjustment);
-      }
+      await insertTransaction(db, built);
       await load();
     } catch (error) {
       Alert.alert("消し込みに失敗しました", error instanceof Error ? error.message : String(error));
