@@ -3,8 +3,10 @@
 
 /**
  * 金額が「正の整数円」として妥当かを検証する。
- * 家計簿の金額は円単位の整数のみを許容し、0 以下・非整数・非有限値は不正とする。
+ * 家計簿の金額は円単位の整数のみを許容し、0 以下・非整数・非有限値・
+ * Number.MAX_SAFE_INTEGER（2^53 − 1）を超える値は不正とする
+ * （上限を超えると合算時に精度を静かに失うため）。
  */
 export function isValidAmount(amount: number): boolean {
-  return Number.isInteger(amount) && amount > 0;
+  return Number.isInteger(amount) && amount > 0 && amount <= Number.MAX_SAFE_INTEGER;
 }

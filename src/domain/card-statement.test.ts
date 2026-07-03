@@ -149,4 +149,76 @@ describe("deriveCardStatement", () => {
     const result = deriveCardStatement(card, txs, "2026-01-20");
     expect(result).toEqual({ currentAmount: 0, nextAmount: 0, settlementBalance: 0 });
   });
+
+  it("決済口座に adjustment（初期残高）のみがある場合も今回請求分に反映される（Major-1 回帰）", () => {
+    const card = makeCard({ id: "card-1", settlementAccountId: "settle-1", closingDay: 15 });
+    const txs = [
+      makeTransaction({
+        type: "adjustment",
+        toAccountId: "settle-1",
+        fromAccountId: null,
+        amount: 5000,
+        date: "2026-01-05",
+      }),
+    ];
+    const result = deriveCardStatement(card, txs, "2026-01-20");
+    expect(result).toEqual({ currentAmount: 5000, nextAmount: 0, settlementBalance: 5000 });
+  });
+
+  it("消し込み額と請求額の差額を adjustment で消し込むと今回請求分は 0 になる（消し込み・差額反映）", () => {
+    const card = makeCard({ id: "card-1", settlementAccountId: "settle-1", closingDay: 15 });
+    const txs = [
+      makeTransaction({
+        type: "expense_card",
+        cardId: "card-1",
+        toAccountId: "settle-1",
+        amount: 3000,
+        date: "2026-01-10", // 締め日以前 -> 今回請求分
+      }),
+      makeTransaction({
+        type: "card_debit",
+        cardId: "card-1",
+        fromAccountId: "settle-1",
+        amount: 2800, // 実際の引き落としは 2800（200 少ない）
+        date: "2026-01-27",
+      }),
+      makeTransaction({
+        type: "adjustment",
+        fromAccountId: "settle-1",
+        toAccountId: null,
+        amount: 200, // 差額 200 を調整で消し込む
+        date: "2026-01-28",
+      }),
+    ];
+    const result = deriveCardStatement(card, txs, "2026-02-01");
+    // settlementBalance = 3000(expense_card) - 2800(card_debit) - 200(adjustment) = 0
+    // nextAmount = 0（締め日以降の expense_card なし）-> currentAmount = 0 - 0 = 0
+    expect(result.settlementBalance).toBe(0);
+    expect(result.nextAmount).toBe(0);
+    expect(result.currentAmount).toBe(0);
+  });
+
+  it("過払い（card_debit が請求額を超える）の場合 currentAmount は負値のまま保持される（0 に丸めない）", () => {
+    const card = makeCard({ id: "card-1", settlementAccountId: "settle-1", closingDay: 15 });
+    const txs = [
+      makeTransaction({
+        type: "expense_card",
+        cardId: "card-1",
+        toAccountId: "settle-1",
+        amount: 3000,
+        date: "2026-01-10",
+      }),
+      makeTransaction({
+        type: "card_debit",
+        cardId: "card-1",
+        fromAccountId: "settle-1",
+        amount: 3500, // 請求額(3000)を超える過払い
+        date: "2026-01-27",
+      }),
+    ];
+    const result = deriveCardStatement(card, txs, "2026-02-01");
+    expect(result.settlementBalance).toBe(-500);
+    expect(result.nextAmount).toBe(0);
+    expect(result.currentAmount).toBe(-500);
+  });
 });

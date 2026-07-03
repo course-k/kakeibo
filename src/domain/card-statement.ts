@@ -10,7 +10,12 @@ import { clampDayToMonth, addMonths, formatIsoDate, parseIsoDate, compareIsoDate
 import type { Card, Transaction } from "./types";
 
 export type CardStatement = {
-  /** 今回請求分。直近の締め日までに積んだ未消し込み分（0 未満にはならない）。 */
+  /**
+   * 今回請求分。settlementBalance − nextAmount（次回以降分）で導出する。
+   * 決済口座残高を経由するため、消し込み・差額 adjustment・初期残高 adjustment が自動反映される。
+   * 過払い・不整合で負になり得るが、0 に丸めず負値のまま返す（UI 側が警告表示に使う）。
+   * この値を `Math.max(_, 0)` で 0 に丸めてはならない（spec §2.2）。
+   */
   currentAmount: number;
   /** 次回以降分。直近の締め日より後に積んだ、まだ締まっていない分。 */
   nextAmount: number;
@@ -39,10 +44,12 @@ function lastClosingDateOnOrBefore(today: string, closingDay: number): string {
 }
 
 /**
- * カードの今回請求分/次回以降分を導出する。
- * 締め日設定時: 直近の締め日以前に積んだ expense_card 合計から card_debit 合計を差し引いた額を
- * 今回請求分とし（0 未満は 0 に丸める）、締め日より後に積んだ expense_card 合計を次回以降分とする。
- * 締め日未設定時: 決済口座残高の全額を今回請求分（準備額）とし、次回以降分は 0 とする。
+ * カードの今回請求分/次回以降分を導出する（spec §2.2）。
+ * 次回以降分（unbilled/nextAmount）= 直近の締め日より後に積んだ expense_card 合計。
+ * 今回請求分（currentAmount）= 決済口座残高（settlementBalance） − 次回以降分。
+ * 決済口座残高を経由することで、消し込み・差額 adjustment・初期残高 adjustment がすべて
+ * 自動反映される。currentAmount は 0 に丸めず、負値（過払い・不整合）もそのまま返す。
+ * 締め日未設定時: 次回以降分は 0 とし、決済口座残高の全額を今回請求分（準備額）とする。
  */
 export function deriveCardStatement(
   card: Card,
@@ -57,25 +64,17 @@ export function deriveCardStatement(
 
   const lastClosingDate = lastClosingDateOnOrBefore(today, card.closingDay);
 
-  let billedToDate = 0;
   let unbilled = 0;
-  let paid = 0;
 
   for (const tx of transactions) {
     if (!isActive(tx) || tx.cardId !== card.id) continue;
-    if (tx.type === "expense_card") {
-      if (compareIsoDate(tx.date, lastClosingDate) <= 0) {
-        billedToDate += tx.amount;
-      } else {
-        unbilled += tx.amount;
-      }
-    } else if (tx.type === "card_debit") {
-      paid += tx.amount;
+    if (tx.type === "expense_card" && compareIsoDate(tx.date, lastClosingDate) > 0) {
+      unbilled += tx.amount;
     }
   }
 
-  const currentAmount = Math.max(billedToDate - paid, 0);
   const nextAmount = unbilled;
+  const currentAmount = settlementBalance - nextAmount;
 
   return { currentAmount, nextAmount, settlementBalance };
 }
