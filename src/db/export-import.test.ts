@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { insertAccount } from "./accounts-repository";
 import { insertCard } from "./cards-repository";
-import { createNodeDatabase } from "./client";
+import { createNodeDatabase } from "./test-utils";
 import BetterSqlite3 from "better-sqlite3";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import path from "node:path";
