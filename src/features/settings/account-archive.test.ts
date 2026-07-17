@@ -6,11 +6,13 @@ function tx(
   id: string,
   amount: number,
   fromAccountId: string | null,
-  toAccountId: string | null
+  toAccountId: string | null,
+  date = "2026-07-03",
+  deletedAt: string | null = null,
 ): Transaction {
   return {
     id,
-    date: "2026-07-03",
+    date,
     amount,
     type: "adjustment",
     fromAccountId,
@@ -20,13 +22,36 @@ function tx(
     recurringRuleId: null,
     createdAt: "2026-07-03T00:00:00.000Z",
     updatedAt: "2026-07-03T00:00:00.000Z",
-    deletedAt: null,
+    deletedAt,
   };
 }
 
 describe("canArchiveAccount", () => {
-  it("deriveBalance で残高 0 の口座だけアーカイブ可能にする", () => {
-    expect(canArchiveAccount("budget-1", [tx("in", 1000, null, "budget-1"), tx("out", 1000, "budget-1", null)])).toBe(true);
-    expect(canArchiveAccount("budget-1", [tx("in", 1000, null, "budget-1")])).toBe(false);
+  it("基準日現在の残高が0で未来の有効取引もない場合だけ終了可能にする", () => {
+    const settled = [
+      tx("in", 1000, null, "budget-1"),
+      tx("out", 1000, "budget-1", null),
+    ];
+    expect(canArchiveAccount("budget-1", settled, "2026-07-03")).toBe(true);
+    expect(
+      canArchiveAccount("budget-1", [tx("in", 1000, null, "budget-1")], "2026-07-03"),
+    ).toBe(false);
+    expect(
+      canArchiveAccount(
+        "budget-1",
+        [...settled, tx("future", 500, "budget-1", null, "2026-07-04")],
+        "2026-07-03",
+      ),
+    ).toBe(false);
+  });
+
+  it("論理削除済みの未来取引は終了を妨げない", () => {
+    expect(
+      canArchiveAccount(
+        "budget-1",
+        [tx("future", 500, "budget-1", null, "2026-07-04", "2026-07-03T12:00:00Z")],
+        "2026-07-03",
+      ),
+    ).toBe(true);
   });
 });

@@ -17,5 +17,8 @@ describe("normalizeIsoDate", () => {
     expect(() => normalizeIsoDate("not-a-date")).toThrow();
     expect(() => normalizeIsoDate("2026-13-01")).toThrow();
     expect(() => normalizeIsoDate("2026-01-32")).toThrow();
+    expect(() => normalizeIsoDate("2026-02-29")).toThrow();
+    expect(() => normalizeIsoDate("2026-02-31")).toThrow();
+    expect(normalizeIsoDate("2028-02-29")).toBe("2028-02-29");
   });
 });

@@ -4,6 +4,15 @@ import { makeAccount, makeCard } from "./test-fixtures";
 import type { Account } from "./types";
 
 describe("validateTransaction", () => {
+  it("カード以外の取引にcardIdを付けられない", () => {
+    expect(
+      validateTransaction(
+        { amount: 100, type: "expense_cash", fromAccountId: budget.id, toAccountId: null, cardId: "card-1" },
+        accounts,
+        []
+      )
+    ).toEqual({ ok: false, reason: "unexpected_card" });
+  });
   const budget = makeAccount({ id: "budget-1", type: "budget" });
   const budget2 = makeAccount({ id: "budget-2", type: "budget" });
   const settlement = makeAccount({ id: "settlement-1", type: "card_settlement" });
@@ -132,6 +141,16 @@ describe("validateTransaction", () => {
       expect(result).toEqual({ ok: true });
     });
 
+    it("違反: カードが未設定", () => {
+      expect(
+        validateTransaction(
+          { amount: 3000, type: "expense_card", fromAccountId: budget.id, toAccountId: settlement.id, cardId: null },
+          accounts,
+          [card]
+        )
+      ).toEqual({ ok: false, reason: "missing_card" });
+    });
+
     it("違反: to が budget 口座", () => {
       const result = validateTransaction(
         {
@@ -205,6 +224,16 @@ describe("validateTransaction", () => {
       expect(result).toEqual({ ok: true });
     });
 
+    it("違反: 同じ予算への振替", () => {
+      expect(
+        validateTransaction(
+          { amount: 2000, type: "transfer", fromAccountId: budget.id, toAccountId: budget.id },
+          accounts,
+          []
+        )
+      ).toEqual({ ok: false, reason: "same_transfer_account" });
+    });
+
     it("違反: to が card_settlement 口座", () => {
       const result = validateTransaction(
         { amount: 2000, type: "transfer", fromAccountId: budget.id, toAccountId: settlement.id },
@@ -240,6 +269,16 @@ describe("validateTransaction", () => {
         [card]
       );
       expect(result).toEqual({ ok: true });
+    });
+
+    it("違反: カードが未設定", () => {
+      expect(
+        validateTransaction(
+          { amount: 3000, type: "card_debit", fromAccountId: settlement.id, toAccountId: null, cardId: null },
+          accounts,
+          [card]
+        )
+      ).toEqual({ ok: false, reason: "missing_card" });
     });
 
     it("違反: from が budget 口座", () => {
@@ -307,6 +346,58 @@ describe("validateTransaction", () => {
         []
       );
       expect(result).toEqual({ ok: true });
+    });
+
+    it("正常系: カード支払準備の調整は対応するcardIdを保持できる", () => {
+      const card = makeCard({ id: "card-adjustment", settlementAccountId: settlement.id });
+      expect(
+        validateTransaction(
+          {
+            amount: 100,
+            type: "adjustment",
+            fromAccountId: null,
+            toAccountId: settlement.id,
+            cardId: card.id,
+          },
+          accounts,
+          [card]
+        )
+      ).toEqual({ ok: true });
+    });
+
+    it("違反: 予算調整にcardIdを付けられない", () => {
+      const card = makeCard({ id: "card-adjustment", settlementAccountId: settlement.id });
+      expect(
+        validateTransaction(
+          {
+            amount: 100,
+            type: "adjustment",
+            fromAccountId: null,
+            toAccountId: budget.id,
+            cardId: card.id,
+          },
+          accounts,
+          [card]
+        )
+      ).toEqual({ ok: false, reason: "card_settlement_mismatch" });
+    });
+
+    it("違反: カード支払準備とcardIdの対応が違う", () => {
+      const otherSettlement = makeAccount({ id: "settlement-other", type: "card_settlement" });
+      const otherCard = makeCard({ id: "card-other", settlementAccountId: otherSettlement.id });
+      expect(
+        validateTransaction(
+          {
+            amount: 100,
+            type: "adjustment",
+            fromAccountId: settlement.id,
+            toAccountId: null,
+            cardId: otherCard.id,
+          },
+          [...accounts, otherSettlement],
+          [otherCard]
+        )
+      ).toEqual({ ok: false, reason: "card_settlement_mismatch" });
     });
 
     it("違反: 両方設定されている", () => {

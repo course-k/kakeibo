@@ -12,10 +12,11 @@ function isActive(tx: Transaction): boolean {
  * 残高 = to とする取引の合計（＋）− from とする取引の合計（−）。
  * 論理削除された取引は集計から除外される。
  */
-export function deriveBalance(accountId: string, transactions: Transaction[]): number {
+export function deriveBalance(accountId: string, transactions: Transaction[], asOf?: string): number {
   let balance = 0;
   for (const tx of transactions) {
     if (!isActive(tx)) continue;
+    if (asOf !== undefined && tx.date > asOf) continue;
     if (tx.toAccountId === accountId) balance += tx.amount;
     if (tx.fromAccountId === accountId) balance -= tx.amount;
   }
@@ -25,11 +26,12 @@ export function deriveBalance(accountId: string, transactions: Transaction[]): n
 /** 全口座の残高を { accountId: 残高 } の形で導出する。 */
 export function deriveAllBalances(
   accounts: Account[],
-  transactions: Transaction[]
+  transactions: Transaction[],
+  asOf?: string
 ): Record<string, number> {
   const result: Record<string, number> = {};
   for (const account of accounts) {
-    result[account.id] = deriveBalance(account.id, transactions);
+    result[account.id] = deriveBalance(account.id, transactions, asOf);
   }
   return result;
 }

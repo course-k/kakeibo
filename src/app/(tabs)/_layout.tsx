@@ -1,13 +1,11 @@
-// タブレイアウト（土台所有ファイル）。ホーム / レポート / 設定 の3タブ。M3〜M6 は編集しない。
+// タブレイアウト。日常的に使うホーム・履歴・レポートと設定を並べる。
 import { Tabs } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
-import { useColorScheme } from 'react-native';
 
 import { Colors } from '@/constants/theme';
 
 export default function TabsLayout() {
-  const scheme = useColorScheme();
-  const colors = Colors[scheme === 'dark' ? 'dark' : 'light'];
+  const colors = Colors.light;
 
   return (
     <Tabs
@@ -24,6 +22,19 @@ export default function TabsLayout() {
             <SymbolView
               tintColor={color}
               name={{ ios: 'house', android: 'home', web: 'home' }}
+              size={size}
+            />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="history"
+        options={{
+          title: '履歴',
+          tabBarIcon: ({ color, size }) => (
+            <SymbolView
+              tintColor={color}
+              name={{ ios: 'list.bullet', android: 'list', web: 'list' }}
               size={size}
             />
           ),

@@ -1,80 +1,36 @@
-// カードの請求分（今回/次回）導出。
-// 参照: lab/docs/design/kakeibo-v1-spec.md §2.2 導出値 / §6 締め日は翌月一括払いのみ
-//
-// 【解釈】spec は「直近の締め日以前の期間に積んだ未消し込み分を取引日で分計」とのみ
-// 記述しており、card_debit（消し込み）がどの取引を消すかは明記されていない。
-// 本実装は「消し込みは常に直近の締め日までに積んだ分（今回請求分）から先に減らす」
-// という FIFO 的な前提を置く。まだ締まっていない分（次回以降分）は消し込みの対象外。
+// カードごとの支払準備総額を取引から導出する。
+// 締め日・引き落とし日だけでは実際の請求周期を一意に決められないため、
+// 今回請求分/次回以降分は推定しない。実引き落とし額は明細確認後に入力する。
 import { deriveBalance } from "./balance";
-import { clampDayToMonth, addMonths, formatIsoDate, parseIsoDate, compareIsoDate } from "./date-utils";
 import type { Card, Transaction } from "./types";
 
-export type CardStatement = {
-  /**
-   * 今回請求分。settlementBalance − nextAmount（次回以降分）で導出する。
-   * 決済口座残高を経由するため、消し込み・差額 adjustment・初期残高 adjustment が自動反映される。
-   * 過払い・不整合で負になり得るが、0 に丸めず負値のまま返す（UI 側が警告表示に使う）。
-   * この値を `Math.max(_, 0)` で 0 に丸めてはならない（spec §2.2）。
-   */
-  currentAmount: number;
-  /** 次回以降分。直近の締め日より後に積んだ、まだ締まっていない分。 */
-  nextAmount: number;
-  /** 決済口座残高の全額（deriveBalance による導出値。currentAmount + nextAmount の参照元）。 */
-  settlementBalance: number;
-};
-
-function isActive(tx: Transaction): boolean {
-  return tx.deletedAt === null;
-}
-
 /**
- * today 時点で「直近に到来した締め日」の日付（'YYYY-MM-DD'）を返す。
- * 締め日当日は含む（当日以前）。closingDay の月末丸めを考慮する。
+ * today 時点のカード支払準備総額を返す。
+ * expense_card、card_debit、adjustment を含む決済口座の全取引から導出し、
+ * 過払い・不整合による負値も警告表示に使えるよう丸めず保持する。
  */
-function lastClosingDateOnOrBefore(today: string, closingDay: number): string {
-  const { year, month } = parseIsoDate(today);
-  const dayThisMonth = clampDayToMonth(year, month, closingDay);
-  const candidateThisMonth = formatIsoDate(year, month, dayThisMonth);
-  if (compareIsoDate(candidateThisMonth, today) <= 0) {
-    return candidateThisMonth;
-  }
-  const prev = addMonths(year, month, -1);
-  const dayPrevMonth = clampDayToMonth(prev.year, prev.month, closingDay);
-  return formatIsoDate(prev.year, prev.month, dayPrevMonth);
-}
-
-/**
- * カードの今回請求分/次回以降分を導出する（spec §2.2）。
- * 次回以降分（unbilled/nextAmount）= 直近の締め日より後に積んだ expense_card 合計。
- * 今回請求分（currentAmount）= 決済口座残高（settlementBalance） − 次回以降分。
- * 決済口座残高を経由することで、消し込み・差額 adjustment・初期残高 adjustment がすべて
- * 自動反映される。currentAmount は 0 に丸めず、負値（過払い・不整合）もそのまま返す。
- * 締め日未設定時: 次回以降分は 0 とし、決済口座残高の全額を今回請求分（準備額）とする。
- */
-export function deriveCardStatement(
+export function deriveCardPreparedAmount(
   card: Card,
   transactions: Transaction[],
   today: string
-): CardStatement {
-  const settlementBalance = deriveBalance(card.settlementAccountId, transactions);
+): number {
+  return deriveBalance(card.settlementAccountId, transactions, today);
+}
 
-  if (card.closingDay === null) {
-    return { currentAmount: settlementBalance, nextAmount: 0, settlementBalance };
-  }
+/** カード履歴1件が支払準備総額を増減させる符号付き金額を返す。 */
+export function deriveCardPreparedChange(card: Card, transaction: Transaction): number {
+  let change = 0;
+  if (transaction.toAccountId === card.settlementAccountId) change += transaction.amount;
+  if (transaction.fromAccountId === card.settlementAccountId) change -= transaction.amount;
+  return change;
+}
 
-  const lastClosingDate = lastClosingDateOnOrBefore(today, card.closingDay);
-
-  let unbilled = 0;
-
-  for (const tx of transactions) {
-    if (!isActive(tx) || tx.cardId !== card.id) continue;
-    if (tx.type === "expense_card" && compareIsoDate(tx.date, lastClosingDate) > 0) {
-      unbilled += tx.amount;
-    }
-  }
-
-  const nextAmount = unbilled;
-  const currentAmount = settlementBalance - nextAmount;
-
-  return { currentAmount, nextAmount, settlementBalance };
+/** cardId導入前のsettlement adjustmentも、対応カードの履歴として扱う。 */
+export function isCardPreparedTransaction(card: Card, transaction: Transaction): boolean {
+  if (transaction.cardId === card.id) return true;
+  if (transaction.type !== "adjustment" || transaction.cardId !== null) return false;
+  return (
+    transaction.fromAccountId === card.settlementAccountId ||
+    transaction.toAccountId === card.settlementAccountId
+  );
 }

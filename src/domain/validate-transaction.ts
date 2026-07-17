@@ -14,6 +14,9 @@ export type ValidationErrorReason =
   | "invalid_from_account_type"
   | "invalid_to_account_type"
   | "invalid_adjustment_accounts"
+  | "same_transfer_account"
+  | "missing_card"
+  | "unexpected_card"
   | "card_not_found"
   | "card_settlement_mismatch";
 
@@ -100,13 +103,17 @@ function validateByType(
       if (!from.ok) return from;
       const to = checkTo(tx, accounts, "card_settlement");
       if (!to.ok) return to;
+      if (!tx.cardId) return { ok: false, reason: "missing_card" };
       return checkCardLink(tx.cardId, tx.toAccountId, cards);
     }
     case "transfer": {
       // from: budget / to: budget
       const from = checkFrom(tx, accounts, "budget");
       if (!from.ok) return from;
-      return checkTo(tx, accounts, "budget");
+      const to = checkTo(tx, accounts, "budget");
+      if (!to.ok) return to;
+      if (tx.fromAccountId === tx.toAccountId) return { ok: false, reason: "same_transfer_account" };
+      return { ok: true };
     }
     case "card_debit": {
       // from: card_settlement / to: 外部（null）
@@ -114,6 +121,7 @@ function validateByType(
       if (!from.ok) return from;
       const noTo = checkNoTo(tx);
       if (!noTo.ok) return noTo;
+      if (!tx.cardId) return { ok: false, reason: "missing_card" };
       return checkCardLink(tx.cardId, tx.fromAccountId, cards);
     }
     case "adjustment": {
@@ -126,6 +134,14 @@ function validateByType(
       }
       if (hasTo && !findAccount(accounts, tx.toAccountId)) {
         return { ok: false, reason: "to_account_not_found" };
+      }
+      if (tx.cardId != null) {
+        const adjustedAccountId = hasFrom ? tx.fromAccountId : tx.toAccountId;
+        const adjustedAccount = findAccount(accounts, adjustedAccountId);
+        if (adjustedAccount?.type !== "card_settlement") {
+          return { ok: false, reason: "card_settlement_mismatch" };
+        }
+        return checkCardLink(tx.cardId, adjustedAccountId, cards);
       }
       return { ok: true };
     }
@@ -145,5 +161,13 @@ export function validateTransaction(
   cards: Card[]
 ): ValidationResult {
   if (!isValidAmount(tx.amount)) return { ok: false, reason: "invalid_amount" };
+  if (
+    tx.type !== "expense_card" &&
+    tx.type !== "card_debit" &&
+    tx.type !== "adjustment" &&
+    tx.cardId != null
+  ) {
+    return { ok: false, reason: "unexpected_card" };
+  }
   return validateByType(tx.type, tx, accounts, cards);
 }

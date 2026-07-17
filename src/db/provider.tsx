@@ -28,7 +28,11 @@ export function DbProvider({ children }: PropsWithChildren) {
   if (error) {
     return (
       <ThemedView style={styles.center}>
-        <ThemedText>DB migration failed: {error.message}</ThemedText>
+        <ThemedText>データベースを更新できませんでした</ThemedText>
+        <ThemedText style={styles.detail}>
+          アプリを終了して再度開いてください。解決しない場合は、データを初期化せずエラー内容を控えてください。
+        </ThemedText>
+        <ThemedText style={styles.detail}>{error.message}</ThemedText>
       </ThemedView>
     );
   }
@@ -58,5 +62,7 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
+    padding: 24,
   },
+  detail: { marginTop: 12, textAlign: 'center' },
 });

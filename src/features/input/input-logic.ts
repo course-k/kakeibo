@@ -1,5 +1,5 @@
 import type { NewTransactionInput, TransactionPatch } from "@/db/transactions-repository";
-import type { Card, Transaction } from "@/domain/types";
+import type { Account, Card, Transaction } from "@/domain/types";
 
 export type PaymentSelection =
   | { kind: "cash" }
@@ -17,6 +17,37 @@ export type InputDefaults = {
   budgetAccountId: string | null;
   payment: PaymentSelection;
 };
+
+export type ExpensePreviewChange = {
+  accountId: string;
+  kind: "budget" | "card_settlement";
+  before: number;
+  after: number;
+  wasOriginal: boolean;
+  isNext: boolean;
+};
+
+type ExpenseTransactionShape = Pick<
+  Transaction,
+  "amount" | "type" | "fromAccountId" | "toAccountId" | "date"
+>;
+
+export function isEditableExpenseTransaction(
+  transaction: Pick<Transaction, "type">
+): boolean {
+  return transaction.type === "expense_cash" || transaction.type === "expense_card";
+}
+
+export function selectInputBudgetAccounts(
+  accounts: Account[],
+  editingBudgetAccountId: string | null
+): Account[] {
+  return accounts.filter(
+    (account) =>
+      account.type === "budget" &&
+      (account.archivedAt === null || account.id === editingBudgetAccountId)
+  );
+}
 
 export function todayIsoDate(now: Date = new Date()): string {
   const year = now.getFullYear();
@@ -104,9 +135,86 @@ export function buildExpenseTransactionInput(
 
 export function buildExpenseTransactionPatch(
   state: InputFormState,
-  cards: Card[]
+  cards: Card[],
+  original: Transaction
 ): TransactionPatch {
-  return buildExpenseTransactionInput(state, cards);
+  if (!isEditableExpenseTransaction(original)) {
+    throw new Error("この記録は支出入力画面では編集できません");
+  }
+  if (
+    original.recurringRuleId !== null &&
+    state.date.slice(0, 7) !== original.date.slice(0, 7)
+  ) {
+    throw new Error("毎月の自動記録は別の月へ移動できません");
+  }
+  return {
+    ...buildExpenseTransactionInput(state, cards),
+    recurringRuleId: original.recurringRuleId,
+  };
+}
+
+/**
+ * 現在残高から元の支出を一度戻し、新しい支出を適用した口座別残高を返す。
+ * 同じ口座を使い続ける場合は1行にまとめ、二重に before を表示しない。
+ */
+export function deriveExpenseEditPreview(
+  balances: Record<string, number>,
+  next: ExpenseTransactionShape,
+  original: ExpenseTransactionShape | null,
+  asOfDate?: string
+): ExpensePreviewChange[] {
+  if (!isEditableExpenseTransaction(next)) {
+    throw new Error("preview target must be an expense transaction");
+  }
+  if (original && !isEditableExpenseTransaction(original)) {
+    throw new Error("preview original must be an expense transaction");
+  }
+  if (!next.fromAccountId) {
+    throw new Error("preview target budget is required");
+  }
+
+  const changes = new Map<string, ExpensePreviewChange>();
+  const ensure = (
+    accountId: string,
+    kind: ExpensePreviewChange["kind"],
+    side: "original" | "next"
+  ) => {
+    const current = changes.get(accountId) ?? {
+      accountId,
+      kind,
+      before: balances[accountId] ?? 0,
+      after: balances[accountId] ?? 0,
+      wasOriginal: false,
+      isNext: false,
+    };
+    current.wasOriginal ||= side === "original";
+    current.isNext ||= side === "next";
+    changes.set(accountId, current);
+    return current;
+  };
+
+  if (original && (asOfDate === undefined || original.date <= asOfDate)) {
+    if (!original.fromAccountId) {
+      throw new Error("preview original budget is required");
+    }
+    ensure(original.fromAccountId, "budget", "original").after += original.amount;
+    if (original.type === "expense_card") {
+      if (!original.toAccountId) {
+        throw new Error("preview original card settlement is required");
+      }
+      ensure(original.toAccountId, "card_settlement", "original").after -= original.amount;
+    }
+  }
+
+  ensure(next.fromAccountId, "budget", "next").after -= next.amount;
+  if (next.type === "expense_card") {
+    if (!next.toAccountId) {
+      throw new Error("preview target card settlement is required");
+    }
+    ensure(next.toAccountId, "card_settlement", "next").after += next.amount;
+  }
+
+  return [...changes.values()];
 }
 
 export function deriveLastInputDefaults(
@@ -116,9 +224,8 @@ export function deriveLastInputDefaults(
   const latest = [...transactions]
     .filter((tx) => tx.type === "expense_cash" || tx.type === "expense_card")
     .sort((a, b) => {
-      const dateOrder = a.date.localeCompare(b.date);
-      if (dateOrder !== 0) return dateOrder;
-      return a.createdAt.localeCompare(b.createdAt);
+      const createdOrder = a.createdAt.localeCompare(b.createdAt);
+      return createdOrder;
     })
     .at(-1);
 
@@ -155,4 +262,23 @@ export function inputStateFromTransaction(
     date: transaction.date,
     memo: transaction.memo,
   };
+}
+
+export function createEditingInputState(
+  transaction: Transaction,
+  cards: Card[],
+  accounts: Account[]
+): InputFormState {
+  if (!isEditableExpenseTransaction(transaction)) {
+    throw new Error("この記録は支出入力画面では編集できません");
+  }
+  const state = inputStateFromTransaction(transaction, cards);
+  const sourceExists = selectInputBudgetAccounts(
+    accounts,
+    transaction.fromAccountId
+  ).some((account) => account.id === transaction.fromAccountId);
+  if (!sourceExists) {
+    throw new Error("この支出に紐づく予算が見つかりません");
+  }
+  return state;
 }

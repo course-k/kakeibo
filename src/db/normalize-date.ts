@@ -16,7 +16,8 @@ export function normalizeIsoDate(date: string): string {
   if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) {
     throw new Error(`invalid date format: ${date}`);
   }
-  if (month < 1 || month > 12 || day < 1 || day > 31) {
+  const daysInMonth = new Date(year, month, 0).getDate();
+  if (year < 1 || month < 1 || month > 12 || day < 1 || day > daysInMonth) {
     throw new Error(`invalid date value: ${date}`);
   }
   return formatIsoDate(year, month, day);

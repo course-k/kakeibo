@@ -21,4 +21,18 @@ describe("buildInitialBalanceAdjustment", () => {
       memo: "補正",
     });
   });
+
+  it("カード支払準備の調整にはカードIDを保持する", () => {
+    expect(
+      buildInitialBalanceAdjustment({
+        accountId: "card-settlement",
+        cardId: "card-a",
+        amount: 300,
+        date: "2026-07-03",
+      })
+    ).toMatchObject({
+      toAccountId: "card-settlement",
+      cardId: "card-a",
+    });
+  });
 });

@@ -4,11 +4,9 @@
  */
 
 import { Colors } from '@/constants/theme';
-import { useColorScheme } from '@/hooks/use-color-scheme';
 
 export function useTheme() {
-  const scheme = useColorScheme();
-  const theme = scheme === 'unspecified' ? 'light' : scheme;
-
-  return Colors[theme];
+  // v1 は画面ごとのdark対応が未完了のためlightへ統一する。
+  // 一部だけdark化して入力欄が読めなくなる状態を避け、対応時に全画面を一括検証する。
+  return Colors.light;
 }

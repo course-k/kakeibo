@@ -14,8 +14,10 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { ThemedText } from "@/components/themed-text";
 import { ThemedView } from "@/components/themed-view";
 import { Colors, Spacing } from "@/constants/theme";
-import type { Account, Card } from "@/domain/types";
+import type { Account, Card, Transaction } from "@/domain/types";
+import { deriveBalance } from "@/domain/balance";
 import { useDb } from "@/db/provider";
+import { normalizeIsoDate } from "@/db/normalize-date";
 import { listAccounts } from "@/db/accounts-repository";
 import { listCards } from "@/db/cards-repository";
 import {
@@ -30,10 +32,13 @@ import {
   buildExpenseTransactionInput,
   buildExpenseTransactionPatch,
   clearAmount,
+  createEditingInputState,
   createInitialInputState,
   deleteAmountDigit,
+  deriveExpenseEditPreview,
   deriveLastInputDefaults,
-  inputStateFromTransaction,
+  isEditableExpenseTransaction,
+  selectInputBudgetAccounts,
   todayIsoDate,
   type InputFormState,
   type PaymentSelection,
@@ -48,33 +53,50 @@ export default function InputScreen() {
   const editingId = typeof params.transactionId === "string" ? params.transactionId : null;
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [cards, setCards] = useState<Card[]>([]);
+  const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
+  const [balances, setBalances] = useState<Record<string, number>>({});
   const [state, setState] = useState<InputFormState | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const budgetAccounts = useMemo(
-    () => accounts.filter((account) => account.type === "budget" && account.archivedAt === null),
-    [accounts]
+    () => selectInputBudgetAccounts(accounts, editingTransaction?.fromAccountId ?? null),
+    [accounts, editingTransaction]
   );
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
+    setState(null);
+    setEditingTransaction(null);
     try {
       const [loadedAccounts, loadedCards, loadedTransactions] = await Promise.all([
-        listAccounts(db, { includeArchived: false }),
+        listAccounts(db, { includeArchived: true }),
         listCards(db),
         listTransactions(db),
       ]);
-      const activeBudgets = loadedAccounts.filter((account) => account.type === "budget");
+      const activeBudgets = loadedAccounts.filter(
+        (account) => account.type === "budget" && account.archivedAt === null
+      );
       const target = editingId ? await getTransactionById(db, editingId) : undefined;
+      if (editingId && !target) {
+        throw new Error("編集する支出が見つかりません");
+      }
+      if (target && !isEditableExpenseTransaction(target)) {
+        throw new Error("この記録は支出入力画面では編集できません");
+      }
       const defaults = deriveLastInputDefaults(loadedTransactions, loadedCards);
+      const defaultBudgetAccountId = activeBudgets.some(
+        (account) => account.id === defaults.budgetAccountId
+      )
+        ? defaults.budgetAccountId
+        : activeBudgets[0]?.id ?? null;
       const nextState = target
-        ? inputStateFromTransaction(target, loadedCards)
+        ? createEditingInputState(target, loadedCards, loadedAccounts)
         : createInitialInputState(
             {
-              budgetAccountId: defaults.budgetAccountId ?? activeBudgets[0]?.id ?? null,
+              budgetAccountId: defaultBudgetAccountId,
               payment: normalizePayment(defaults.payment, loadedCards),
             },
             todayIsoDate()
@@ -82,6 +104,15 @@ export default function InputScreen() {
 
       setAccounts(loadedAccounts);
       setCards(loadedCards);
+      setEditingTransaction(target ?? null);
+      setBalances(
+        Object.fromEntries(
+          loadedAccounts.map((account) => [
+            account.id,
+            deriveBalance(account.id, loadedTransactions, todayIsoDate()),
+          ])
+        )
+      );
       setState(nextState);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "入力画面の読み込みに失敗しました");
@@ -114,10 +145,22 @@ export default function InputScreen() {
     setSaving(true);
     setError(null);
     try {
+      const normalizedDate = normalizeIsoDate(state.date);
+      if (normalizedDate > todayIsoDate()) {
+        throw new Error("未来の日付は記録できません");
+      }
+      const normalizedState = { ...state, date: normalizedDate };
       if (editingId) {
-        await updateTransaction(db, editingId, buildExpenseTransactionPatch(state, cards));
+        if (!editingTransaction) {
+          throw new Error("編集する支出が見つかりません");
+        }
+        await updateTransaction(
+          db,
+          editingId,
+          buildExpenseTransactionPatch(normalizedState, cards, editingTransaction)
+        );
       } else {
-        await insertTransaction(db, buildExpenseTransactionInput(state, cards));
+        await insertTransaction(db, buildExpenseTransactionInput(normalizedState, cards));
       }
       router.back();
     } catch (cause) {
@@ -152,11 +195,50 @@ export default function InputScreen() {
     ]);
   };
 
-  if (loading || !state) {
+  const selectedBudget = budgetAccounts.find((account) => account.id === state?.budgetAccountId);
+  const amount = state ? Number(state.amountText || 0) : 0;
+  const previewChanges = useMemo(() => {
+    if (!state || !selectedBudget || amount <= 0) return [];
+    try {
+      const next = buildExpenseTransactionInput(state, cards);
+      return deriveExpenseEditPreview(balances, next, editingTransaction, todayIsoDate());
+    } catch {
+      return [];
+    }
+  }, [amount, balances, cards, editingTransaction, selectedBudget, state]);
+  const nextBudgetChange = previewChanges.find(
+    (change) => change.kind === "budget" && change.isNext
+  );
+  const archivedEditingBudget = editingTransaction
+    ? accounts.find(
+        (account) =>
+          account.id === editingTransaction.fromAccountId &&
+          account.type === "budget" &&
+          account.archivedAt !== null
+      )
+    : undefined;
+
+  if (loading) {
     return (
       <ThemedView style={styles.screen}>
         <SafeAreaView style={styles.center}>
           <ActivityIndicator />
+        </SafeAreaView>
+      </ThemedView>
+    );
+  }
+
+  if (!state) {
+    return (
+      <ThemedView style={styles.screen}>
+        <SafeAreaView style={styles.center}>
+          <View style={styles.loadError}>
+            <ThemedText type="subtitle">入力画面を開けません</ThemedText>
+            <ThemedText themeColor="textSecondary">{error ?? 'データを読み込めませんでした'}</ThemedText>
+            <Pressable style={styles.saveButton} onPress={() => void load()}>
+              <ThemedText style={styles.saveButtonText}>もう一度試す</ThemedText>
+            </Pressable>
+          </View>
         </SafeAreaView>
       </ThemedView>
     );
@@ -172,7 +254,9 @@ export default function InputScreen() {
               value={state.date}
               onChangeText={(date) => updateState({ date })}
               style={styles.dateInput}
-              inputMode="numeric"
+              inputMode="text"
+              autoCapitalize="none"
+              autoCorrect={false}
               placeholder="YYYY-MM-DD"
             />
           </View>
@@ -192,22 +276,31 @@ export default function InputScreen() {
             ))}
           </View>
 
-          <SectionTitle title="予算口座" />
+          <SectionTitle title="どの予算から使う？" />
+          {budgetAccounts.length === 0 ? (
+            <View style={styles.emptyState}>
+              <ThemedText>先に予算を1つ作成してください</ThemedText>
+              <Pressable style={styles.secondaryButton} onPress={() => router.replace('/(tabs)/settings')}>
+                <ThemedText type="smallBold">設定を開く</ThemedText>
+              </Pressable>
+            </View>
+          ) : (
           <View style={styles.choices}>
             {budgetAccounts.map((account) => (
               <ChoiceButton
                 key={account.id}
-                label={account.name}
+                label={`${account.name}${account.archivedAt ? "（終了済み）" : ""}  ${formatYen(balances[account.id] ?? 0)}`}
                 selected={state.budgetAccountId === account.id}
                 onPress={() => updateState({ budgetAccountId: account.id })}
               />
             ))}
           </View>
+          )}
 
           <SectionTitle title="支払手段" />
           <View style={styles.choices}>
             <ChoiceButton
-              label="現金"
+              label="現金・即時払い"
               selected={state.payment.kind === "cash"}
               onPress={() => updateState({ payment: { kind: "cash" } })}
             />
@@ -221,18 +314,62 @@ export default function InputScreen() {
             ))}
           </View>
 
+          {previewChanges.length > 0 ? (
+            <View style={[styles.preview, nextBudgetChange && nextBudgetChange.after < 0 && styles.previewWarning]}>
+              <ThemedText type="smallBold">保存すると</ThemedText>
+              {previewChanges.map((change) => (
+                <ThemedText key={change.accountId}>
+                  {previewChangeLabel(change, accounts, cards, Boolean(editingTransaction))}{" "}
+                  {formatYen(change.before)} → {formatYen(change.after)}
+                </ThemedText>
+              ))}
+              {nextBudgetChange && nextBudgetChange.after < 0 ? (
+                <ThemedText style={styles.warningText}>予算を超えます。保存後に別の予算から移してください。</ThemedText>
+              ) : null}
+            </View>
+          ) : null}
+
+          <TextInput
+            value={state.memo}
+            onChangeText={(memo) => updateState({ memo })}
+            style={styles.dateInput}
+            placeholder="店名・メモ（任意）"
+            returnKeyType="done"
+          />
+
+          {archivedEditingBudget ? (
+            <View style={styles.previewWarning}>
+              <ThemedText type="smallBold">「{archivedEditingBudget.name}」は終了済みです</ThemedText>
+              <ThemedText type="small">
+                過去の残高を隠さないため、金額の変更や削除の前に予算を再開してください。
+              </ThemedText>
+              <Pressable
+                style={styles.secondaryButton}
+                onPress={() => router.push('/(tabs)/settings')}>
+                <ThemedText type="smallBold">設定で予算を再開</ThemedText>
+              </Pressable>
+            </View>
+          ) : null}
+
           {error ? <ThemedText themeColor="textSecondary">{error}</ThemedText> : null}
 
-          <Pressable style={styles.saveButton} onPress={handleSave} disabled={saving}>
+        </ScrollView>
+        <View style={styles.footer}>
+          <Pressable
+            style={styles.saveButton}
+            onPress={handleSave}
+            disabled={saving || budgetAccounts.length === 0 || Boolean(archivedEditingBudget)}>
             <ThemedText style={styles.saveButtonText}>{saving ? "保存中" : "保存"}</ThemedText>
           </Pressable>
-
           {editingId ? (
-            <Pressable style={styles.deleteButton} onPress={handleDelete} disabled={saving}>
+            <Pressable
+              style={styles.deleteButton}
+              onPress={handleDelete}
+              disabled={saving || Boolean(archivedEditingBudget)}>
               <ThemedText style={styles.deleteButtonText}>削除</ThemedText>
             </Pressable>
           ) : null}
-        </ScrollView>
+        </View>
       </SafeAreaView>
     </ThemedView>
   );
@@ -249,6 +386,27 @@ function SectionTitle({ title }: { title: string }) {
   return <ThemedText type="smallBold">{title}</ThemedText>;
 }
 
+function formatYen(amount: number): string {
+  const sign = amount < 0 ? '-' : '';
+  return `${sign}¥${Math.abs(amount).toLocaleString('ja-JP')}`;
+}
+
+function previewChangeLabel(
+  change: ReturnType<typeof deriveExpenseEditPreview>[number],
+  accounts: Account[],
+  cards: Card[],
+  editing: boolean
+): string {
+  const account = accounts.find((item) => item.id === change.accountId);
+  const card = cards.find((item) => item.settlementAccountId === change.accountId);
+  const name =
+    change.kind === "card_settlement"
+      ? `${card?.name ?? account?.name ?? "カード"} の支払準備`
+      : account?.name ?? "予算";
+  if (!editing || change.wasOriginal === change.isNext) return name;
+  return `${change.wasOriginal ? "変更前" : "変更後"}: ${name}`;
+}
+
 function ChoiceButton({
   label,
   selected,
@@ -259,7 +417,11 @@ function ChoiceButton({
   onPress: () => void;
 }) {
   return (
-    <Pressable style={[styles.choice, selected && styles.choiceSelected]} onPress={onPress}>
+    <Pressable
+      accessibilityRole="radio"
+      accessibilityState={{ checked: selected }}
+      style={[styles.choice, selected && styles.choiceSelected]}
+      onPress={onPress}>
       <ThemedText type="smallBold">{label}</ThemedText>
     </Pressable>
   );
@@ -277,8 +439,22 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  loadError: {
+    gap: Spacing.three,
+    maxWidth: 360,
+    padding: Spacing.three,
+    width: '100%',
+  },
   content: {
     gap: Spacing.three,
+    padding: Spacing.three,
+    paddingBottom: Spacing.four,
+  },
+  footer: {
+    backgroundColor: Colors.light.background,
+    borderTopColor: Colors.light.backgroundSelected,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    gap: Spacing.two,
     padding: Spacing.three,
   },
   header: {
@@ -310,6 +486,33 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     flexWrap: "wrap",
     gap: Spacing.two,
+  },
+  emptyState: {
+    gap: Spacing.two,
+    padding: Spacing.three,
+    borderRadius: 8,
+    backgroundColor: Colors.light.backgroundElement,
+  },
+  secondaryButton: {
+    alignItems: "center",
+    borderRadius: 8,
+    backgroundColor: Colors.light.backgroundSelected,
+    padding: Spacing.three,
+  },
+  preview: {
+    gap: Spacing.one,
+    padding: Spacing.three,
+    borderRadius: 8,
+    backgroundColor: "#eff6ff",
+  },
+  previewWarning: {
+    backgroundColor: "#fff7ed",
+    borderRadius: 8,
+    gap: Spacing.two,
+    padding: Spacing.three,
+  },
+  warningText: {
+    color: "#c2410c",
   },
   choice: {
     borderRadius: 8,
