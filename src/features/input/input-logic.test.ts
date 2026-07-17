@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
-import type { Card, Transaction } from "@/domain/types";
+import type { Account, Card, Transaction } from "@/domain/types";
 import {
   amountFromText,
   buildExpenseTransactionInput,
+  createEditingInputState,
   createInitialInputState,
   deriveLastInputDefaults,
+  selectInputBudgetAccounts,
   todayIsoDate,
 } from "./input-logic";
 
@@ -17,6 +19,20 @@ const cards: Card[] = [
     debitDay: 27,
   },
 ];
+
+function account(overrides: Partial<Account> & Pick<Account, "id">): Account {
+  return {
+    name: overrides.id,
+    type: "budget",
+    monthlyBudget: 0,
+    ownerId: null,
+    sortOrder: 0,
+    archivedAt: null,
+    createdAt: "2026-07-01T00:00:00.000Z",
+    updatedAt: "2026-07-01T00:00:00.000Z",
+    ...overrides,
+  };
+}
 
 function tx(overrides: Partial<Transaction>): Transaction {
   return {
@@ -37,6 +53,41 @@ function tx(overrides: Partial<Transaction>): Transaction {
 }
 
 describe("input logic", () => {
+  it("過去支出の編集では利用元の終了済み予算だけを候補に残して保持する", () => {
+    const active = account({ id: "budget-active" });
+    const archivedSource = account({ id: "budget-old", archivedAt: "2026-07-01" });
+    const unrelatedArchived = account({ id: "budget-other", archivedAt: "2026-06-01" });
+    const settlement = account({ id: "settlement", type: "card_settlement" });
+    const transaction = tx({ fromAccountId: archivedSource.id });
+
+    expect(
+      selectInputBudgetAccounts(
+        [active, archivedSource, unrelatedArchived, settlement],
+        transaction.fromAccountId
+      ).map((item) => item.id)
+    ).toEqual([active.id, archivedSource.id]);
+    expect(createEditingInputState(transaction, cards, [active, archivedSource]).budgetAccountId).toBe(
+      archivedSource.id
+    );
+  });
+
+  it("編集元の予算が欠損している場合は別予算へ付け替えない", () => {
+    expect(() =>
+      createEditingInputState(tx({ fromAccountId: "missing" }), cards, [
+        account({ id: "budget-active" }),
+      ])
+    ).toThrow("この支出に紐づく予算が見つかりません");
+  });
+
+  it("新規入力では終了済み予算を候補に含めない", () => {
+    expect(
+      selectInputBudgetAccounts(
+        [account({ id: "active" }), account({ id: "archived", archivedAt: "2026-07-01" })],
+        null
+      ).map((item) => item.id)
+    ).toEqual(["active"]);
+  });
+
   it("今日の日付を YYYY-MM-DD で作る", () => {
     expect(todayIsoDate(new Date(2026, 6, 3))).toBe("2026-07-03");
   });
@@ -117,6 +168,28 @@ describe("input logic", () => {
       budgetAccountId: "budget-new",
       payment: { kind: "cash" },
     });
+  });
+
+  it("過去日の後入力でも、操作順で前回デフォルトを導く", () => {
+    const defaults = deriveLastInputDefaults(
+      [
+        tx({
+          id: "newer-date",
+          date: "2026-07-10",
+          fromAccountId: "budget-old-operation",
+          createdAt: "2026-07-10T01:00:00.000Z",
+        }),
+        tx({
+          id: "later-operation",
+          date: "2026-07-01",
+          fromAccountId: "budget-last-used",
+          createdAt: "2026-07-11T01:00:00.000Z",
+        }),
+      ],
+      cards
+    );
+
+    expect(defaults.budgetAccountId).toBe("budget-last-used");
   });
 
   it("直近のカード支出から前回カードを導く", () => {

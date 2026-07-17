@@ -27,6 +27,15 @@ describe("deriveBalance", () => {
   it("取引がなければ 0", () => {
     expect(deriveBalance("a", [])).toBe(0);
   });
+
+  it("基準日より未来の取引は現在残高へ反映しない", () => {
+    const txs = [
+      makeTransaction({ type: "income", toAccountId: "a", amount: 5000, date: "2026-07-01" }),
+      makeTransaction({ type: "expense_cash", fromAccountId: "a", amount: 2000, date: "2026-08-01" }),
+    ];
+    expect(deriveBalance("a", txs, "2026-07-17")).toBe(5000);
+    expect(deriveBalance("a", txs, "2026-08-01")).toBe(3000);
+  });
 });
 
 describe("deriveAllBalances", () => {

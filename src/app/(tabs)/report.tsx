@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useFocusEffect } from 'expo-router';
+import { useCallback, useMemo, useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -32,19 +33,21 @@ export default function ReportScreen() {
     setLoading(false);
   }, [db]);
 
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      reload().catch(() => setLoading(false));
-    }, 0);
-    return () => clearTimeout(timer);
-  }, [reload]);
+  useFocusEffect(
+    useCallback(() => {
+      const timer = setTimeout(() => {
+        reload().catch(() => setLoading(false));
+      }, 0);
+      return () => clearTimeout(timer);
+    }, [reload])
+  );
 
   const summary = useMemo(
     () => summarizeMonthlyBudgetExpenses(accounts, transactions),
     [accounts, transactions]
   );
   const months = summary.monthlyTrend.map((item) => item.month);
-  const activeMonth = selectedMonth ?? months.at(-1) ?? new Date().toISOString().slice(0, 7);
+  const activeMonth = selectedMonth ?? months.at(-1) ?? localYearMonth();
   const monthlyRows = summary.byAccount.filter((item) => item.month === activeMonth);
   const maxAccountAmount = Math.max(1, ...monthlyRows.map((item) => item.amount));
   const maxTrendAmount = Math.max(1, ...summary.monthlyTrend.map((item) => item.amount));
@@ -96,6 +99,11 @@ export default function ReportScreen() {
       </SafeAreaView>
     </ThemedView>
   );
+}
+
+function localYearMonth(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 }
 
 const styles = StyleSheet.create({

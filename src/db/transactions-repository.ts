@@ -4,7 +4,7 @@
 // 参照: lab/docs/design/kakeibo-v1-spec.md §2.1 transactions / §2.3 不変条件 1・2・5
 import { and, asc, eq, isNull } from "drizzle-orm";
 import { validateTransaction } from "../domain/validate-transaction";
-import type { Transaction } from "../domain/types";
+import type { Account, Transaction } from "../domain/types";
 import { listAccounts } from "./accounts-repository";
 import { listCards } from "./cards-repository";
 import type { AppDatabase } from "./client";
@@ -43,6 +43,33 @@ async function assertValid(
   const result = validateTransaction(tx, accounts, cards);
   if (!result.ok) {
     throw new Error(`invalid transaction: ${result.reason}`);
+  }
+}
+
+type AccountReferences = Pick<Transaction, "fromAccountId" | "toAccountId">;
+
+/**
+ * 終了済み予算は通常画面から隠れるため、それを参照する既存取引を変更すると
+ * ユーザーから見えない残高が動いてしまう。更新・削除の境界で必ず拒否する。
+ */
+async function assertNoArchivedBudgetReferences(
+  db: AppDatabase,
+  references: AccountReferences,
+  action: "変更" | "削除"
+): Promise<void> {
+  const accounts = await listAccounts(db, { includeArchived: true });
+  const byId = new Map<string, Account>(accounts.map((account) => [account.id, account]));
+  const referencedIds = [references.fromAccountId, references.toAccountId].filter(
+    (id): id is string => id !== null
+  );
+  const archivedBudget = referencedIds
+    .map((id) => byId.get(id))
+    .find((account) => account?.type === "budget" && account.archivedAt !== null);
+
+  if (archivedBudget) {
+    throw new Error(
+      `終了済みの予算「${archivedBudget.name}」を参照する取引は${action}できません。先に予算を再開してください。`
+    );
   }
 }
 
@@ -96,6 +123,8 @@ export async function updateTransaction(
     toAccountId: patch.toAccountId !== undefined ? patch.toAccountId : existing.toAccountId,
     cardId: patch.cardId !== undefined ? patch.cardId : existing.cardId,
   };
+  await assertNoArchivedBudgetReferences(db, existing, "変更");
+  await assertNoArchivedBudgetReferences(db, merged, "変更");
   await assertValid(db, merged);
   const now = new Date().toISOString();
   const values: Partial<TransactionRow> = { ...patch, updatedAt: now };
@@ -112,6 +141,7 @@ export async function updateTransaction(
 export async function softDeleteTransaction(db: AppDatabase, id: string): Promise<void> {
   const existing = await getTransactionRowById(db, id);
   if (!existing) throw new Error(`transaction not found: ${id}`);
+  await assertNoArchivedBudgetReferences(db, existing, "削除");
   const now = new Date().toISOString();
   await db.update(transactions).set({ deletedAt: now, updatedAt: now }).where(eq(transactions.id, id));
 }

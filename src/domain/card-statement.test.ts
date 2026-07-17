@@ -221,4 +221,23 @@ describe("deriveCardStatement", () => {
     expect(result.nextAmount).toBe(0);
     expect(result.currentAmount).toBe(-500);
   });
+
+  it("未来日のカード取引は今日の準備額・請求額へ反映しない", () => {
+    const card = makeCard({ id: "card-1", settlementAccountId: "settle-1", closingDay: 15 });
+    const txs = [
+      makeTransaction({
+        type: "expense_card",
+        cardId: card.id,
+        toAccountId: card.settlementAccountId,
+        amount: 3000,
+        date: "2026-08-01",
+      }),
+    ];
+
+    expect(deriveCardStatement(card, txs, "2026-07-17")).toEqual({
+      settlementBalance: 0,
+      currentAmount: 0,
+      nextAmount: 0,
+    });
+  });
 });

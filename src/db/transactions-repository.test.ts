@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { insertAccount } from "./accounts-repository";
+import { insertAccount, updateAccount } from "./accounts-repository";
 import { insertCard } from "./cards-repository";
 import { createTestDb } from "./test-utils";
 import {
@@ -126,6 +126,76 @@ describe("transactions-repository", () => {
     const updated = await updateTransaction(db, tx.id, { amount: 2000, date: "2026-2-1" });
     expect(updated.amount).toBe(2000);
     expect(updated.date).toBe("2026-02-01");
+  });
+
+  it("終了済み予算を参照する既存取引の update を拒否し、取引を変更しない", async () => {
+    const db = createTestDb();
+    const { budget } = await seedAccounts(db);
+    const tx = await insertTransaction(db, {
+      date: "2026-01-01",
+      amount: 1000,
+      type: "expense_cash",
+      fromAccountId: budget.id,
+      toAccountId: null,
+      cardId: null,
+      memo: "変更前",
+      recurringRuleId: null,
+    });
+    await updateAccount(db, budget.id, { archivedAt: "2026-01-31" });
+
+    await expect(updateTransaction(db, tx.id, { amount: 2000, memo: "変更後" })).rejects.toThrow(
+      "終了済みの予算「生活費」を参照する取引は変更できません。先に予算を再開してください。"
+    );
+    expect(await getTransactionById(db, tx.id)).toEqual(tx);
+  });
+
+  it("update 後に終了済み予算を参照する変更を拒否する", async () => {
+    const db = createTestDb();
+    const { budget } = await seedAccounts(db);
+    const archivedBudget = await insertAccount(db, {
+      name: "終了済み予算",
+      type: "budget",
+      monthlyBudget: 10000,
+      ownerId: null,
+      sortOrder: 2,
+      archivedAt: "2025-12-31",
+    });
+    const tx = await insertTransaction(db, {
+      date: "2026-01-01",
+      amount: 1000,
+      type: "income",
+      fromAccountId: null,
+      toAccountId: budget.id,
+      cardId: null,
+      memo: "",
+      recurringRuleId: null,
+    });
+
+    await expect(updateTransaction(db, tx.id, { toAccountId: archivedBudget.id })).rejects.toThrow(
+      "終了済みの予算「終了済み予算」を参照する取引は変更できません。先に予算を再開してください。"
+    );
+    expect((await getTransactionById(db, tx.id))?.toAccountId).toBe(budget.id);
+  });
+
+  it("終了済み予算を参照する既存取引の softDelete を拒否し、取引を残す", async () => {
+    const db = createTestDb();
+    const { budget } = await seedAccounts(db);
+    const tx = await insertTransaction(db, {
+      date: "2026-01-01",
+      amount: 1000,
+      type: "income",
+      fromAccountId: null,
+      toAccountId: budget.id,
+      cardId: null,
+      memo: "",
+      recurringRuleId: null,
+    });
+    await updateAccount(db, budget.id, { archivedAt: "2026-01-31" });
+
+    await expect(softDeleteTransaction(db, tx.id)).rejects.toThrow(
+      "終了済みの予算「生活費」を参照する取引は削除できません。先に予算を再開してください。"
+    );
+    expect(await getTransactionById(db, tx.id)).toEqual(tx);
   });
 
   it("不変条件5: 論理削除された取引は listTransactions/getTransactionById に現れない", async () => {

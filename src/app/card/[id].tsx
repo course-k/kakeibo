@@ -1,5 +1,5 @@
-import { useLocalSearchParams } from "expo-router";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
+import { useCallback, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -16,13 +16,13 @@ import { ThemedView } from "@/components/themed-view";
 import { useDb } from "@/db/provider";
 import { getCardById } from "@/db/cards-repository";
 import { insertTransaction, listTransactions } from "@/db/transactions-repository";
-import { deriveCardStatement, type Card, type CardStatement } from "@/domain";
+import { deriveCardStatement, type Card, type CardStatement, type Transaction } from "@/domain";
 import { buildCardSettlementTransactions } from "@/features/cards/settlement";
 
 type ScreenState =
   | { status: "loading" }
   | { status: "notFound" }
-  | { status: "ready"; card: Card; statement: CardStatement }
+  | { status: "ready"; card: Card; statement: CardStatement; transactions: Transaction[] }
   | { status: "error"; message: string };
 
 function formatYen(amount: number): string {
@@ -49,6 +49,7 @@ function parseAmount(text: string): number | null {
 export default function CardDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const db = useDb();
+  const router = useRouter();
   const [state, setState] = useState<ScreenState>({ status: "loading" });
   const [paidAmountText, setPaidAmountText] = useState("");
   const [saving, setSaving] = useState(false);
@@ -71,19 +72,31 @@ export default function CardDetailScreen() {
         return;
       }
       const statement = deriveCardStatement(card, transactions, todayIsoDate());
-      setState({ status: "ready", card, statement });
+      setState({
+        status: "ready",
+        card,
+        statement,
+        transactions: transactions.filter((transaction) => transaction.cardId === card.id).reverse(),
+      });
       setPaidAmountText(String(Math.max(statement.currentAmount, 0)));
     } catch (error) {
       setState({ status: "error", message: error instanceof Error ? error.message : String(error) });
     }
   }, [cardId, db]);
 
-  useEffect(() => {
-    const timeout = setTimeout(() => {
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
+      const timeout = setTimeout(() => {
+        if (!active) return;
       void load();
-    }, 0);
-    return () => clearTimeout(timeout);
-  }, [load]);
+      }, 0);
+      return () => {
+        active = false;
+        clearTimeout(timeout);
+      };
+    }, [load])
+  );
 
   const paidAmount = useMemo(() => parseAmount(paidAmountText), [paidAmountText]);
   const canSave = state.status === "ready" && paidAmount !== null && !saving;
@@ -106,6 +119,18 @@ export default function CardDetailScreen() {
       setSaving(false);
     }
   }, [db, load, paidAmount, state]);
+
+  const confirmSettle = useCallback(() => {
+    if (state.status !== "ready" || paidAmount === null) return;
+    Alert.alert(
+      "カード引き落としを記録",
+      `${state.card.name} の引き落とし ${formatYen(paidAmount)} を記録します。`,
+      [
+        { text: "キャンセル", style: "cancel" },
+        { text: "記録する", onPress: () => void handleSettle() },
+      ]
+    );
+  }, [handleSettle, paidAmount, state]);
 
   return (
     <ThemedView style={styles.root}>
@@ -139,19 +164,19 @@ export default function CardDetailScreen() {
 
               <View style={styles.summary}>
                 <View style={styles.row}>
-                  <ThemedText>決済口座残高</ThemedText>
+                  <ThemedText>支払準備済み</ThemedText>
                   <ThemedText type="smallBold" style={styles.amountText}>
                     {formatYen(state.statement.settlementBalance)}
                   </ThemedText>
                 </View>
                 <View style={styles.row}>
-                  <ThemedText>今回請求分</ThemedText>
+                  <ThemedText>今回の引き落とし分</ThemedText>
                   <ThemedText type="smallBold" style={styles.amountText}>
                     {formatYen(state.statement.currentAmount)}
                   </ThemedText>
                 </View>
                 <View style={styles.row}>
-                  <ThemedText>次回分</ThemedText>
+                  <ThemedText>次回以降の利用分</ThemedText>
                   <ThemedText type="smallBold" style={styles.amountText}>
                     {formatYen(state.statement.nextAmount)}
                   </ThemedText>
@@ -165,7 +190,7 @@ export default function CardDetailScreen() {
               ) : null}
 
               <View style={styles.settlement}>
-                <ThemedText type="smallBold">消し込み金額</ThemedText>
+                <ThemedText type="smallBold">実際の引き落とし額</ThemedText>
                 <TextInput
                   value={paidAmountText}
                   onChangeText={setPaidAmountText}
@@ -177,13 +202,34 @@ export default function CardDetailScreen() {
                 <Pressable
                   accessibilityRole="button"
                   disabled={!canSave}
-                  onPress={handleSettle}
+                  onPress={confirmSettle}
                   style={[styles.button, !canSave ? styles.buttonDisabled : null]}
                 >
                   <ThemedText style={styles.buttonText}>
-                    {saving ? "消し込み中" : "消し込む"}
+                    {saving ? "記録中" : "引き落としを記録"}
                   </ThemedText>
                 </Pressable>
+              </View>
+
+              <View style={styles.history}>
+                <ThemedText type="subtitle">このカードの履歴</ThemedText>
+                {state.transactions.length === 0 ? <ThemedText>まだ記録がありません</ThemedText> : null}
+                {state.transactions.slice(0, 20).map((transaction) => (
+                  <Pressable
+                    key={transaction.id}
+                    onPress={() =>
+                      transaction.type === 'expense_card'
+                        ? router.push({ pathname: '/input', params: { transactionId: transaction.id } })
+                        : router.push(`/transaction/${transaction.id}`)
+                    }
+                    style={styles.historyRow}>
+                    <View style={styles.historyText}>
+                      <ThemedText>{transaction.memo || (transaction.type === 'card_debit' ? 'カード引き落とし' : 'カード利用')}</ThemedText>
+                      <ThemedText type="small" themeColor="textSecondary">{transaction.date}</ThemedText>
+                    </View>
+                    <ThemedText>{transaction.type === 'card_debit' ? '-' : ''}{formatYen(transaction.amount)}</ThemedText>
+                  </Pressable>
+                ))}
               </View>
             </>
           ) : null}
@@ -236,6 +282,17 @@ const styles = StyleSheet.create({
   settlement: {
     gap: 12,
   },
+  history: { gap: 10 },
+  historyRow: {
+    alignItems: 'center',
+    borderBottomColor: '#d1d5db',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    minHeight: 56,
+    paddingVertical: 8,
+  },
+  historyText: { flex: 1, gap: 2 },
   input: {
     minHeight: 48,
     borderWidth: StyleSheet.hairlineWidth,

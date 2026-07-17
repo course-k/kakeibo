@@ -1,6 +1,7 @@
-import { insertAccount } from "../../db/accounts-repository";
-import { insertCard, updateCard, type CardPatch } from "../../db/cards-repository";
+import { updateCard, type CardPatch } from "../../db/cards-repository";
 import type { AppDatabase } from "../../db/client";
+import { generateId } from "../../db/id";
+import { accounts as accountsTable, cards as cardsTable } from "../../db/schema";
 import type { Account, Card } from "../../domain/types";
 
 export type CreateCardInput = {
@@ -19,20 +20,33 @@ export async function createCardWithSettlementAccount(
   db: AppDatabase,
   input: CreateCardInput
 ): Promise<CreatedCardWithSettlement> {
-  const settlementAccount = await insertAccount(db, {
-    name: `${input.name} 決済口座`,
+  const now = new Date().toISOString();
+  const settlementAccount: Account = {
+    id: generateId(),
+    name: `${input.name} 支払準備`,
     type: "card_settlement",
     monthlyBudget: 0,
     ownerId: null,
     sortOrder: input.sortOrder,
     archivedAt: null,
-  });
-  const card = await insertCard(db, {
+    createdAt: now,
+    updatedAt: now,
+  };
+  const card: Card = {
+    id: generateId(),
     name: input.name,
     settlementAccountId: settlementAccount.id,
     closingDay: input.closingDay,
     debitDay: input.debitDay,
+  };
+
+  // AppDatabase は sync driver のため、transaction callback 内では Promise を返さず
+  // 各 insert を同期実行する。カード作成失敗時は決済口座の insert もロールバックされる。
+  db.transaction((tx) => {
+    tx.insert(accountsTable).values(settlementAccount).run();
+    tx.insert(cardsTable).values(card).run();
   });
+
   return { card, settlementAccount };
 }
 

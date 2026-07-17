@@ -8,8 +8,8 @@ import type { Account, Transaction } from "./types";
  * アーカイブ済み口座を除外するかは呼び出し側の責務とする
  * （渡された accounts のうち type === 'budget' のものをすべて合算する）。
  */
-export function deriveSavings(accounts: Account[], transactions: Transaction[]): number {
+export function deriveSavings(accounts: Account[], transactions: Transaction[], asOf?: string): number {
   return accounts
     .filter((a) => a.type === "budget")
-    .reduce((sum, a) => sum + deriveBalance(a.id, transactions), 0);
+    .reduce((sum, a) => sum + deriveBalance(a.id, transactions, asOf), 0);
 }

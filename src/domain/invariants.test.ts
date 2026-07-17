@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { isValidAmount } from "./amount";
 import { validateTransaction } from "./validate-transaction";
 import { deriveAllBalances, deriveBalance } from "./balance";
-import { makeAccount, makeTransaction } from "./test-fixtures";
+import { makeAccount, makeCard, makeTransaction } from "./test-fixtures";
 import type { Account, Transaction } from "./types";
 
 describe("不変条件 1: 金額は常に正の整数円。ゼロ・負・小数は取引として保存不可", () => {
@@ -30,6 +30,7 @@ describe("不変条件 2: type ごとの from/to 必須制約に反する取引�
   const budget = makeAccount({ id: "budget-1", type: "budget" });
   const settlement = makeAccount({ id: "settlement-1", type: "card_settlement" });
   const accounts: Account[] = [budget, settlement];
+  const card = makeCard({ id: "card-1", settlementAccountId: settlement.id });
 
   it.each([
     ["income", null, "budget-1", true],
@@ -42,9 +43,15 @@ describe("不変条件 2: type ごとの from/to 必須制約に反する取引�
     ["card_debit", "budget-1", null, false],
   ] as const)("%s (from=%s, to=%s) -> ok=%s", (type, fromAccountId, toAccountId, expected) => {
     const result = validateTransaction(
-      { amount: 100, type, fromAccountId, toAccountId },
+      {
+        amount: 100,
+        type,
+        fromAccountId,
+        toAccountId,
+        cardId: type === "expense_card" || type === "card_debit" ? card.id : null,
+      },
       accounts,
-      []
+      [card]
     );
     expect(result.ok).toBe(expected);
   });

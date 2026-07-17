@@ -56,7 +56,7 @@ export function deriveCardStatement(
   transactions: Transaction[],
   today: string
 ): CardStatement {
-  const settlementBalance = deriveBalance(card.settlementAccountId, transactions);
+  const settlementBalance = deriveBalance(card.settlementAccountId, transactions, today);
 
   if (card.closingDay === null) {
     return { currentAmount: settlementBalance, nextAmount: 0, settlementBalance };
@@ -67,7 +67,7 @@ export function deriveCardStatement(
   let unbilled = 0;
 
   for (const tx of transactions) {
-    if (!isActive(tx) || tx.cardId !== card.id) continue;
+    if (!isActive(tx) || tx.cardId !== card.id || compareIsoDate(tx.date, today) > 0) continue;
     if (tx.type === "expense_card" && compareIsoDate(tx.date, lastClosingDate) > 0) {
       unbilled += tx.amount;
     }

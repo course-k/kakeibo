@@ -1,6 +1,7 @@
 // 全データの JSON エクスポート/インポート。
 // 参照: lab/docs/design/kakeibo-v1-spec.md §2.3 不変条件 5・6, §3 設定画面
 import type { Account, Card, RecurringRule, Transaction } from "../domain/types";
+import { validateTransaction } from "../domain/validate-transaction";
 import { listAccounts } from "./accounts-repository";
 import { listCards } from "./cards-repository";
 import type { AppDatabase } from "./client";
@@ -17,7 +18,7 @@ export type ExportedData = {
   exportedAt: string;
   accounts: Account[];
   cards: Card[];
-  /** 論理削除済みは含まない（不変条件 5）。 */
+  /** 論理削除済み tombstone も含む（復元後の再生成を防ぐため）。 */
   transactions: Transaction[];
   recurringRules: RecurringRule[];
 };
@@ -25,13 +26,14 @@ export type ExportedData = {
 /**
  * 全データを JSON にエクスポートする。
  * archived な口座も含む（アーカイブは論理削除ではなく状態なので、往復一致には必要）。
- * 論理削除済みの取引は含まない（不変条件 5）。
+ * 論理削除済みの取引も tombstone として含む。定期取引の削除履歴を失うと、
+ * 復元後の月次実取引化で同じ取引が復活するためである。
  */
 export async function exportData(db: AppDatabase): Promise<ExportedData> {
   const [accountsList, cardsList, transactionsList, recurringRulesList] = await Promise.all([
     listAccounts(db, { includeArchived: true }),
     listCards(db),
-    listTransactions(db),
+    listTransactions(db, { includeDeleted: true }),
     listRecurringRules(db),
   ]);
   return {
@@ -48,9 +50,9 @@ export async function exportData(db: AppDatabase): Promise<ExportedData> {
  * エクスポートされたデータから全データを復元する。
  * 既存データは全置き換えする（機種変更・バックアップ復元の用途）。
  *
- * v1 の import 境界方針: インポートは「アプリ自身が生成したバックアップの復元」を
- * 対象とし、外部由来 JSON の完全な再検証（validateTransaction の再適用）は行わない。
- * ただし次の 2 点は必ず保証する:
+ * 書き込み前に外形・参照整合性・ドメイン不変条件をすべて検証する。不正な JSON は
+ * DB transaction を開始する前に拒否するため、既存データを変更しない。
+ * さらに次の 2 点を保証する:
  *  (a) 全置き換えを 1 つの DB トランザクションで原子的に行う（削除〜再挿入の途中で
  *      失敗しても、既存データが消えたまま残ることはない）
  *  (b) 日付（transactions.date / accounts.archivedAt）を取り込み境界で
@@ -66,7 +68,9 @@ export async function exportData(db: AppDatabase): Promise<ExportedData> {
  * （better-sqlite3 は明示的に例外を投げる）。そのためコールバック内は async/await を
  * 使わず、各クエリビルダの同期実行メソッド .run() を直接呼ぶ。
  */
-export async function importData(db: AppDatabase, data: ExportedData): Promise<void> {
+export async function importData(db: AppDatabase, input: unknown): Promise<void> {
+  assertValidExportedData(input);
+  const data = input;
   db.transaction((tx) => {
     tx.delete(transactions).run();
     tx.delete(recurringRules).run();
@@ -142,5 +146,233 @@ export async function importData(db: AppDatabase, data: ExportedData): Promise<v
         )
         .run();
     }
+  });
+}
+
+const TRANSACTION_TYPES = new Set<Transaction["type"]>([
+  "income",
+  "expense_cash",
+  "expense_card",
+  "transfer",
+  "card_debit",
+  "adjustment",
+]);
+
+function invalid(path: string, reason: string): never {
+  throw new Error(`invalid backup: ${path} ${reason}`);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function requireRecord(value: unknown, path: string): Record<string, unknown> {
+  if (!isRecord(value)) invalid(path, "must be an object");
+  return value;
+}
+
+function requireArray(value: unknown, path: string): unknown[] {
+  if (!Array.isArray(value)) invalid(path, "must be an array");
+  return value;
+}
+
+function requireString(record: Record<string, unknown>, key: string, path: string): string {
+  const value = record[key];
+  if (typeof value !== "string") invalid(`${path}.${key}`, "must be a string");
+  return value;
+}
+
+function requireNullableString(
+  record: Record<string, unknown>,
+  key: string,
+  path: string,
+): string | null {
+  const value = record[key];
+  if (value !== null && typeof value !== "string") {
+    invalid(`${path}.${key}`, "must be a string or null");
+  }
+  return value;
+}
+
+function requireInteger(
+  record: Record<string, unknown>,
+  key: string,
+  path: string,
+): number {
+  const value = record[key];
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    invalid(`${path}.${key}`, "must be a safe integer");
+  }
+  return value;
+}
+
+function requireNullableDay(
+  record: Record<string, unknown>,
+  key: string,
+  path: string,
+): number | null {
+  const value = record[key];
+  if (value === null) return null;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 31) {
+    invalid(`${path}.${key}`, "must be an integer from 1 to 31 or null");
+  }
+  return value;
+}
+
+function requireTransactionType(
+  record: Record<string, unknown>,
+  path: string,
+): Transaction["type"] {
+  const value = requireString(record, "type", path) as Transaction["type"];
+  if (!TRANSACTION_TYPES.has(value)) invalid(`${path}.type`, "is unknown");
+  return value;
+}
+
+function assertUniqueIds(items: { id: string }[], path: string): void {
+  const ids = new Set<string>();
+  for (const item of items) {
+    if (ids.has(item.id)) invalid(path, `contains duplicate id: ${item.id}`);
+    ids.add(item.id);
+  }
+}
+
+function parseAccount(value: unknown, index: number): Account {
+  const path = `accounts[${index}]`;
+  const row = requireRecord(value, path);
+  const type = requireString(row, "type", path);
+  if (type !== "budget" && type !== "card_settlement") invalid(`${path}.type`, "is unknown");
+  const monthlyBudget = requireInteger(row, "monthlyBudget", path);
+  if (monthlyBudget < 0) invalid(`${path}.monthlyBudget`, "must be non-negative");
+  const archivedAt = requireNullableString(row, "archivedAt", path);
+  if (archivedAt !== null) normalizeIsoDate(archivedAt);
+  return {
+    id: requireString(row, "id", path),
+    name: requireString(row, "name", path),
+    type,
+    monthlyBudget,
+    ownerId: requireNullableString(row, "ownerId", path),
+    sortOrder: requireInteger(row, "sortOrder", path),
+    archivedAt,
+    createdAt: requireString(row, "createdAt", path),
+    updatedAt: requireString(row, "updatedAt", path),
+  };
+}
+
+function parseCard(value: unknown, index: number): Card {
+  const path = `cards[${index}]`;
+  const row = requireRecord(value, path);
+  const debitDay = requireInteger(row, "debitDay", path);
+  if (debitDay < 1 || debitDay > 31) invalid(`${path}.debitDay`, "must be from 1 to 31");
+  return {
+    id: requireString(row, "id", path),
+    name: requireString(row, "name", path),
+    settlementAccountId: requireString(row, "settlementAccountId", path),
+    closingDay: requireNullableDay(row, "closingDay", path),
+    debitDay,
+  };
+}
+
+function parseTransaction(value: unknown, index: number): Transaction {
+  const path = `transactions[${index}]`;
+  const row = requireRecord(value, path);
+  const date = requireString(row, "date", path);
+  normalizeIsoDate(date);
+  const deletedAt = requireNullableString(row, "deletedAt", path);
+  return {
+    id: requireString(row, "id", path),
+    date,
+    amount: requireInteger(row, "amount", path),
+    type: requireTransactionType(row, path),
+    fromAccountId: requireNullableString(row, "fromAccountId", path),
+    toAccountId: requireNullableString(row, "toAccountId", path),
+    cardId: requireNullableString(row, "cardId", path),
+    memo: requireString(row, "memo", path),
+    recurringRuleId: requireNullableString(row, "recurringRuleId", path),
+    createdAt: requireString(row, "createdAt", path),
+    updatedAt: requireString(row, "updatedAt", path),
+    deletedAt,
+  };
+}
+
+function parseRecurringRule(value: unknown, index: number): RecurringRule {
+  const path = `recurringRules[${index}]`;
+  const row = requireRecord(value, path);
+  const dayOfMonth = requireInteger(row, "dayOfMonth", path);
+  if (dayOfMonth < 1 || dayOfMonth > 31) {
+    invalid(`${path}.dayOfMonth`, "must be from 1 to 31");
+  }
+  return {
+    id: requireString(row, "id", path),
+    type: requireTransactionType(row, path),
+    amount: requireInteger(row, "amount", path),
+    fromAccountId: requireNullableString(row, "fromAccountId", path),
+    toAccountId: requireNullableString(row, "toAccountId", path),
+    cardId: requireNullableString(row, "cardId", path),
+    memo: requireString(row, "memo", path),
+    dayOfMonth,
+  };
+}
+
+function assertValidExportedData(input: unknown): asserts input is ExportedData {
+  const root = requireRecord(input, "backup");
+  if (root.schemaVersion !== EXPORT_SCHEMA_VERSION) {
+    invalid("schemaVersion", `must equal ${EXPORT_SCHEMA_VERSION}`);
+  }
+  requireString(root, "exportedAt", "backup");
+
+  const parsedAccounts = requireArray(root.accounts, "accounts").map(parseAccount);
+  const parsedCards = requireArray(root.cards, "cards").map(parseCard);
+  const parsedTransactions = requireArray(root.transactions, "transactions").map(parseTransaction);
+  const parsedRules = requireArray(root.recurringRules, "recurringRules").map(parseRecurringRule);
+  assertUniqueIds(parsedAccounts, "accounts");
+  assertUniqueIds(parsedCards, "cards");
+  assertUniqueIds(parsedTransactions, "transactions");
+  assertUniqueIds(parsedRules, "recurringRules");
+
+  const accountById = new Map(parsedAccounts.map((account) => [account.id, account]));
+  const cardById = new Map(parsedCards.map((card) => [card.id, card]));
+  const claimedSettlementIds = new Set<string>();
+  for (const card of parsedCards) {
+    const settlement = accountById.get(card.settlementAccountId);
+    if (!settlement || settlement.type !== "card_settlement") {
+      invalid(`cards.${card.id}.settlementAccountId`, "must reference a card_settlement account");
+    }
+    if (claimedSettlementIds.has(card.settlementAccountId)) {
+      invalid("cards", `settlement account is shared: ${card.settlementAccountId}`);
+    }
+    claimedSettlementIds.add(card.settlementAccountId);
+  }
+  for (const account of parsedAccounts) {
+    if (account.type === "card_settlement" && !claimedSettlementIds.has(account.id)) {
+      invalid(`accounts.${account.id}`, "card_settlement account must belong to exactly one card");
+    }
+  }
+
+  const assertReferences = (
+    value: Pick<Transaction, "fromAccountId" | "toAccountId" | "cardId">,
+    path: string,
+  ) => {
+    if (value.fromAccountId !== null && !accountById.has(value.fromAccountId)) {
+      invalid(`${path}.fromAccountId`, "references a missing account");
+    }
+    if (value.toAccountId !== null && !accountById.has(value.toAccountId)) {
+      invalid(`${path}.toAccountId`, "references a missing account");
+    }
+    if (value.cardId !== null && !cardById.has(value.cardId)) {
+      invalid(`${path}.cardId`, "references a missing card");
+    }
+  };
+
+  parsedRules.forEach((rule, index) => {
+    const path = `recurringRules[${index}]`;
+    assertReferences(rule, path);
+    const validation = validateTransaction(rule, parsedAccounts, parsedCards);
+    if (!validation.ok) invalid(path, `violates transaction invariant: ${validation.reason}`);
+  });
+  parsedTransactions.forEach((transaction, index) => {
+    const path = `transactions[${index}]`;
+    assertReferences(transaction, path);
+    const validation = validateTransaction(transaction, parsedAccounts, parsedCards);
+    if (!validation.ok) invalid(path, `violates transaction invariant: ${validation.reason}`);
   });
 }

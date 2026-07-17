@@ -1,5 +1,5 @@
 import type { NewTransactionInput, TransactionPatch } from "@/db/transactions-repository";
-import type { Card, Transaction } from "@/domain/types";
+import type { Account, Card, Transaction } from "@/domain/types";
 
 export type PaymentSelection =
   | { kind: "cash" }
@@ -17,6 +17,17 @@ export type InputDefaults = {
   budgetAccountId: string | null;
   payment: PaymentSelection;
 };
+
+export function selectInputBudgetAccounts(
+  accounts: Account[],
+  editingBudgetAccountId: string | null
+): Account[] {
+  return accounts.filter(
+    (account) =>
+      account.type === "budget" &&
+      (account.archivedAt === null || account.id === editingBudgetAccountId)
+  );
+}
 
 export function todayIsoDate(now: Date = new Date()): string {
   const year = now.getFullYear();
@@ -116,9 +127,8 @@ export function deriveLastInputDefaults(
   const latest = [...transactions]
     .filter((tx) => tx.type === "expense_cash" || tx.type === "expense_card")
     .sort((a, b) => {
-      const dateOrder = a.date.localeCompare(b.date);
-      if (dateOrder !== 0) return dateOrder;
-      return a.createdAt.localeCompare(b.createdAt);
+      const createdOrder = a.createdAt.localeCompare(b.createdAt);
+      return createdOrder;
     })
     .at(-1);
 
@@ -155,4 +165,20 @@ export function inputStateFromTransaction(
     date: transaction.date,
     memo: transaction.memo,
   };
+}
+
+export function createEditingInputState(
+  transaction: Transaction,
+  cards: Card[],
+  accounts: Account[]
+): InputFormState {
+  const state = inputStateFromTransaction(transaction, cards);
+  const sourceExists = selectInputBudgetAccounts(
+    accounts,
+    transaction.fromAccountId
+  ).some((account) => account.id === transaction.fromAccountId);
+  if (!sourceExists) {
+    throw new Error("この支出に紐づく予算が見つかりません");
+  }
+  return state;
 }
