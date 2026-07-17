@@ -1,6 +1,7 @@
 // DB ドライバのシーム。
-// 本番は expo-sqlite（React Native 実機）。テスト/CI 用の better-sqlite3 は
-// test-utils.ts に分離し、Node ネイティブモジュールを Metro bundle に載せない。
+// 本番は expo-sqlite（React Native 実機）。テスト/CI 用の better-sqlite3 ドライバは
+// src/db/test-utils.ts 側に分離してある（Node ネイティブの better-sqlite3 を
+// アプリのバンドルに引き込まないため。実機ビルドの Metro バンドルで弾かれる）。
 //
 // 両ドライバとも drizzle-orm 上では resultKind='sync' の BaseSQLiteDatabase を返す。
 // TRunResult（各ドライバ固有の実行結果型）だけが異なるので、そこを any にして
