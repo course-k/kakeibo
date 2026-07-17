@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { deriveBalance } from "../../domain/balance";
-import { deriveCardStatement } from "../../domain/card-statement";
+import { deriveCardPreparedAmount } from "../../domain/card-statement";
 import { deriveSavings } from "../../domain/savings";
 import { makeAccount, makeCard, makeTransaction } from "../../domain/test-fixtures";
 
@@ -100,16 +100,14 @@ describe("buildHomeViewModel", () => {
         id: card.id,
         name: card.name,
         debitDay: card.debitDay,
-        currentAmount: deriveCardStatement(card, transactions, "2026-06-20").currentAmount,
-        nextAmount: deriveCardStatement(card, transactions, "2026-06-20").nextAmount,
-        preparedAmount: deriveCardStatement(card, transactions, "2026-06-20").settlementBalance,
+        preparedAmount: deriveCardPreparedAmount(card, transactions, "2026-06-20"),
         needsAttention: false,
       },
     ]);
     expect(model.savingsAmount).toBe(deriveSavings(activeBudgetAccounts, transactions));
   });
 
-  it("負の currentAmount を丸めず、警告フラグを立てる", () => {
+  it("負の支払準備総額を丸めず、警告フラグを立てる", () => {
     const budget = makeAccount({ id: "budget-main", name: "生活費" });
     const settlement = makeAccount({
       id: "settlement-master",
@@ -134,14 +132,63 @@ describe("buildHomeViewModel", () => {
     ];
 
     const model = buildHomeViewModel([budget, settlement], [card], transactions, "2026-06-20");
-    const statement = deriveCardStatement(card, transactions, "2026-06-20");
+    const preparedAmount = deriveCardPreparedAmount(card, transactions, "2026-06-20");
 
-    expect(statement.currentAmount).toBe(-1_500);
+    expect(preparedAmount).toBe(-1_500);
     expect(model.cards[0]).toMatchObject({
-      currentAmount: statement.currentAmount,
-      preparedAmount: statement.settlementBalance,
+      preparedAmount,
       needsAttention: true,
     });
+  });
+
+  it("締め越しでもホームに今回分・次回分を作らない", () => {
+    const budget = makeAccount({ id: "budget-main", name: "生活費" });
+    const settlement = makeAccount({
+      id: "settlement-visa",
+      name: "Visa 決済",
+      type: "card_settlement",
+    });
+    const card = makeCard({
+      id: "card-visa",
+      settlementAccountId: settlement.id,
+      closingDay: 15,
+      debitDay: 27,
+    });
+    const transactions = [
+      makeTransaction({
+        date: "2026-01-10",
+        amount: 10_000,
+        type: "expense_card",
+        fromAccountId: budget.id,
+        toAccountId: settlement.id,
+        cardId: card.id,
+      }),
+      makeTransaction({
+        date: "2026-02-10",
+        amount: 20_000,
+        type: "expense_card",
+        fromAccountId: budget.id,
+        toAccountId: settlement.id,
+        cardId: card.id,
+      }),
+    ];
+
+    const model = buildHomeViewModel(
+      [budget, settlement],
+      [card],
+      transactions,
+      "2026-02-16"
+    );
+
+    expect(model.cards[0]).toEqual({
+      id: card.id,
+      name: card.name,
+      debitDay: card.debitDay,
+      preparedAmount: 30_000,
+      needsAttention: false,
+    });
+    expect(model.cards[0]).not.toHaveProperty("currentAmount");
+    expect(model.cards[0]).not.toHaveProperty("nextAmount");
   });
 
   it("ホームの直近履歴を取引日の新しい順で5件に絞る", () => {

@@ -1,5 +1,5 @@
 import { deriveBalance } from "../../domain/balance";
-import { deriveCardStatement } from "../../domain/card-statement";
+import { deriveCardPreparedAmount } from "../../domain/card-statement";
 import { deriveSavings } from "../../domain/savings";
 import type { Account, Card, Transaction, TransactionType } from "../../domain/types";
 
@@ -13,8 +13,6 @@ export type HomeCardItem = {
   id: string;
   name: string;
   debitDay: number;
-  currentAmount: number;
-  nextAmount: number;
   preparedAmount: number;
   needsAttention: boolean;
 };
@@ -56,15 +54,13 @@ export function buildHomeViewModel(
   return {
     budgetAccounts,
     cards: cards.map((card) => {
-      const statement = deriveCardStatement(card, transactions, today);
+      const preparedAmount = deriveCardPreparedAmount(card, transactions, today);
       return {
         id: card.id,
         name: card.name,
         debitDay: card.debitDay,
-        currentAmount: statement.currentAmount,
-        nextAmount: statement.nextAmount,
-        preparedAmount: statement.settlementBalance,
-        needsAttention: statement.currentAmount < 0 || statement.settlementBalance < 0,
+        preparedAmount,
+        needsAttention: preparedAmount < 0,
       };
     }),
     savingsAmount: deriveSavings(activeBudgetAccounts, transactions, today),

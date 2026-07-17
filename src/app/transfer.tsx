@@ -174,6 +174,9 @@ function ChoiceSection({
       <View style={styles.choices}>
         {accounts.map((account) => (
           <Pressable
+            accessibilityRole="radio"
+            accessibilityState={{ selected: selectedId === account.id }}
+            accessibilityLabel={`${title} ${account.name}、残り${yen(balances[account.id] ?? 0)}`}
             key={account.id}
             onPress={() => onSelect(account.id)}
             style={[styles.choice, selectedId === account.id && styles.choiceSelected]}>

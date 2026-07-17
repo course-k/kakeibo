@@ -35,7 +35,9 @@ import {
   createEditingInputState,
   createInitialInputState,
   deleteAmountDigit,
+  deriveExpenseEditPreview,
   deriveLastInputDefaults,
+  isEditableExpenseTransaction,
   selectInputBudgetAccounts,
   todayIsoDate,
   type InputFormState,
@@ -66,6 +68,8 @@ export default function InputScreen() {
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
+    setState(null);
+    setEditingTransaction(null);
     try {
       const [loadedAccounts, loadedCards, loadedTransactions] = await Promise.all([
         listAccounts(db, { includeArchived: true }),
@@ -76,10 +80,12 @@ export default function InputScreen() {
         (account) => account.type === "budget" && account.archivedAt === null
       );
       const target = editingId ? await getTransactionById(db, editingId) : undefined;
-      const inputBudgets = selectInputBudgetAccounts(
-        loadedAccounts,
-        target?.fromAccountId ?? null
-      );
+      if (editingId && !target) {
+        throw new Error("編集する支出が見つかりません");
+      }
+      if (target && !isEditableExpenseTransaction(target)) {
+        throw new Error("この記録は支出入力画面では編集できません");
+      }
       const defaults = deriveLastInputDefaults(loadedTransactions, loadedCards);
       const defaultBudgetAccountId = activeBudgets.some(
         (account) => account.id === defaults.budgetAccountId
@@ -101,7 +107,7 @@ export default function InputScreen() {
       setEditingTransaction(target ?? null);
       setBalances(
         Object.fromEntries(
-          inputBudgets.map((account) => [
+          loadedAccounts.map((account) => [
             account.id,
             deriveBalance(account.id, loadedTransactions, todayIsoDate()),
           ])
@@ -145,7 +151,14 @@ export default function InputScreen() {
       }
       const normalizedState = { ...state, date: normalizedDate };
       if (editingId) {
-        await updateTransaction(db, editingId, buildExpenseTransactionPatch(normalizedState, cards));
+        if (!editingTransaction) {
+          throw new Error("編集する支出が見つかりません");
+        }
+        await updateTransaction(
+          db,
+          editingId,
+          buildExpenseTransactionPatch(normalizedState, cards, editingTransaction)
+        );
       } else {
         await insertTransaction(db, buildExpenseTransactionInput(normalizedState, cards));
       }
@@ -184,16 +197,18 @@ export default function InputScreen() {
 
   const selectedBudget = budgetAccounts.find((account) => account.id === state?.budgetAccountId);
   const amount = state ? Number(state.amountText || 0) : 0;
-  const restoredOriginalAmount =
-    selectedBudget && editingTransaction?.fromAccountId === selectedBudget.id
-      ? editingTransaction.amount
-      : 0;
-  const remainingAfterSave = selectedBudget
-    ? (balances[selectedBudget.id] ?? 0) + restoredOriginalAmount - amount
-    : null;
-  const payment = state?.payment;
-  const selectedCard =
-    payment?.kind === "card" ? cards.find((card) => card.id === payment.cardId) : undefined;
+  const previewChanges = useMemo(() => {
+    if (!state || !selectedBudget || amount <= 0) return [];
+    try {
+      const next = buildExpenseTransactionInput(state, cards);
+      return deriveExpenseEditPreview(balances, next, editingTransaction, todayIsoDate());
+    } catch {
+      return [];
+    }
+  }, [amount, balances, cards, editingTransaction, selectedBudget, state]);
+  const nextBudgetChange = previewChanges.find(
+    (change) => change.kind === "budget" && change.isNext
+  );
   const archivedEditingBudget = editingTransaction
     ? accounts.find(
         (account) =>
@@ -239,7 +254,9 @@ export default function InputScreen() {
               value={state.date}
               onChangeText={(date) => updateState({ date })}
               style={styles.dateInput}
-              inputMode="numeric"
+              inputMode="text"
+              autoCapitalize="none"
+              autoCorrect={false}
               placeholder="YYYY-MM-DD"
             />
           </View>
@@ -297,18 +314,16 @@ export default function InputScreen() {
             ))}
           </View>
 
-          {selectedBudget && amount > 0 ? (
-            <View style={[styles.preview, remainingAfterSave !== null && remainingAfterSave < 0 && styles.previewWarning]}>
+          {previewChanges.length > 0 ? (
+            <View style={[styles.preview, nextBudgetChange && nextBudgetChange.after < 0 && styles.previewWarning]}>
               <ThemedText type="smallBold">保存すると</ThemedText>
-              <ThemedText>
-                {selectedBudget.name} {formatYen(balances[selectedBudget.id] ?? 0)} → {formatYen(remainingAfterSave ?? 0)}
-              </ThemedText>
-              {selectedCard ? (
-                <ThemedText type="small" themeColor="textSecondary">
-                  同額を「{selectedCard.name} の支払準備」に自動で取り分けます
+              {previewChanges.map((change) => (
+                <ThemedText key={change.accountId}>
+                  {previewChangeLabel(change, accounts, cards, Boolean(editingTransaction))}{" "}
+                  {formatYen(change.before)} → {formatYen(change.after)}
                 </ThemedText>
-              ) : null}
-              {remainingAfterSave !== null && remainingAfterSave < 0 ? (
+              ))}
+              {nextBudgetChange && nextBudgetChange.after < 0 ? (
                 <ThemedText style={styles.warningText}>予算を超えます。保存後に別の予算から移してください。</ThemedText>
               ) : null}
             </View>
@@ -376,6 +391,22 @@ function formatYen(amount: number): string {
   return `${sign}¥${Math.abs(amount).toLocaleString('ja-JP')}`;
 }
 
+function previewChangeLabel(
+  change: ReturnType<typeof deriveExpenseEditPreview>[number],
+  accounts: Account[],
+  cards: Card[],
+  editing: boolean
+): string {
+  const account = accounts.find((item) => item.id === change.accountId);
+  const card = cards.find((item) => item.settlementAccountId === change.accountId);
+  const name =
+    change.kind === "card_settlement"
+      ? `${card?.name ?? account?.name ?? "カード"} の支払準備`
+      : account?.name ?? "予算";
+  if (!editing || change.wasOriginal === change.isNext) return name;
+  return `${change.wasOriginal ? "変更前" : "変更後"}: ${name}`;
+}
+
 function ChoiceButton({
   label,
   selected,
@@ -386,7 +417,11 @@ function ChoiceButton({
   onPress: () => void;
 }) {
   return (
-    <Pressable style={[styles.choice, selected && styles.choiceSelected]} onPress={onPress}>
+    <Pressable
+      accessibilityRole="radio"
+      accessibilityState={{ checked: selected }}
+      style={[styles.choice, selected && styles.choiceSelected]}
+      onPress={onPress}>
       <ThemedText type="smallBold">{label}</ThemedText>
     </Pressable>
   );

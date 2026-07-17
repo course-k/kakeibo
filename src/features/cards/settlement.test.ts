@@ -3,7 +3,7 @@ import { insertAccount } from "../../db/accounts-repository";
 import { insertCard } from "../../db/cards-repository";
 import { createTestDb } from "../../db/test-utils";
 import { insertTransaction, listTransactions } from "../../db/transactions-repository";
-import { deriveCardStatement } from "../../domain";
+import { deriveCardPreparedAmount } from "../../domain";
 import type { Card } from "../../domain/types";
 import { makeCard } from "../../domain/test-fixtures";
 import { buildCardSettlementTransactions } from "./settlement";
@@ -65,7 +65,7 @@ async function settleAndDerive(
     date: input.date,
   });
   await insertTransaction(db, tx);
-  return deriveCardStatement(input.card, await listTransactions(db), input.today);
+  return deriveCardPreparedAmount(input.card, await listTransactions(db), input.today);
 }
 
 describe("buildCardSettlementTransactions", () => {
@@ -89,7 +89,7 @@ describe("buildCardSettlementTransactions", () => {
     });
   });
 
-  it("今回請求分と同額の消し込み後は currentAmount が 0 になる", async () => {
+  it("支払準備総額と同額の引き落とし後は準備額が 0 になる", async () => {
     const db = createTestDb();
     const { budget, card } = await seedCard(db);
     await insertCardExpense(db, {
@@ -106,10 +106,10 @@ describe("buildCardSettlementTransactions", () => {
       today: "2026-02-01",
     });
 
-    expect(result).toEqual({ currentAmount: 0, nextAmount: 0, settlementBalance: 0 });
+    expect(result).toBe(0);
   });
 
-  it("今回請求分より少ない消し込み後は残債が currentAmount に残る", async () => {
+  it("支払準備総額より少ない引き落とし後は差額が準備額に残る", async () => {
     const db = createTestDb();
     const { budget, card } = await seedCard(db);
     await insertCardExpense(db, {
@@ -126,10 +126,10 @@ describe("buildCardSettlementTransactions", () => {
       today: "2026-02-01",
     });
 
-    expect(result).toEqual({ currentAmount: 200, nextAmount: 0, settlementBalance: 200 });
+    expect(result).toBe(200);
   });
 
-  it("今回請求分より多い消し込み後は currentAmount を負値のまま保持する", async () => {
+  it("支払準備総額より多い引き落とし後は負値のまま保持する", async () => {
     const db = createTestDb();
     const { budget, card } = await seedCard(db);
     await insertCardExpense(db, {
@@ -146,7 +146,7 @@ describe("buildCardSettlementTransactions", () => {
       today: "2026-02-01",
     });
 
-    expect(result).toEqual({ currentAmount: -500, nextAmount: 0, settlementBalance: -500 });
+    expect(result).toBe(-500);
   });
 
   it.each([
@@ -164,7 +164,7 @@ describe("buildCardSettlementTransactions", () => {
       paidDate: "2026-02-28",
       today: "2026-03-10",
     },
-  ])("closingDay=31 の $name 境界でも消し込み後の今回/次回分を分計する", async ({
+  ])("closingDay=31 の $name 境界でも請求周期を推定せず準備総額を導出する", async ({
     currentDate,
     nextDate,
     paidDate,
@@ -192,7 +192,7 @@ describe("buildCardSettlementTransactions", () => {
       today,
     });
 
-    expect(result).toEqual({ currentAmount: 400, nextAmount: 400, settlementBalance: 800 });
+    expect(result).toBe(800);
   });
 
   it("正の整数円以外の入力額は保存用取引にしない", () => {

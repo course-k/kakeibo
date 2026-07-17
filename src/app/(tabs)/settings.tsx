@@ -12,7 +12,7 @@ import { useDb } from '@/db/provider';
 import { listRecurringRules } from '@/db/recurring-rules-repository';
 import { insertTransaction, listTransactions } from '@/db/transactions-repository';
 import type { Account, Card, RecurringRule, Transaction } from '@/domain/types';
-import { canArchiveAccount } from '@/features/settings/account-archive';
+import { archiveBlockReason } from '@/features/settings/account-archive';
 import { createCardWithSettlementAccount, updateCardSettings } from '@/features/settings/cards';
 import { createBudgetWithMonthlyRule } from '@/features/settings/budgets';
 import { archiveBudgetAndRules } from '@/features/settings/archive-budget';
@@ -154,7 +154,12 @@ export default function SettingsScreen() {
   }
 
   async function archiveAccount(account: Account) {
-    if (!canArchiveAccount(account.id, transactions)) {
+    const reason = archiveBlockReason(account.id, transactions, today());
+    if (reason === 'future_transaction') {
+      setMessage('未来日付の記録があるため終了できません。履歴で該当記録を訂正または削除してください');
+      return;
+    }
+    if (reason === 'non_zero_balance') {
       setMessage('残額が0円の予算だけ終了できます');
       return;
     }
@@ -280,9 +285,16 @@ export default function SettingsScreen() {
       return;
     }
     try {
+      const cardId =
+        cards.find((card) => card.settlementAccountId === adjustmentAccountId)?.id ?? null;
       await insertTransaction(
         db,
-        buildInitialBalanceAdjustment({ accountId: adjustmentAccountId, amount, date: today() })
+        buildInitialBalanceAdjustment({
+          accountId: adjustmentAccountId,
+          cardId,
+          amount,
+          date: today(),
+        })
       );
       setAdjustmentAmount('');
       setMessage('残高を更新しました');

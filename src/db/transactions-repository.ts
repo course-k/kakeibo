@@ -3,6 +3,7 @@
 // 取引はデフォルトのクエリから常に除外する（不変条件 5）。
 // 参照: lab/docs/design/kakeibo-v1-spec.md §2.1 transactions / §2.3 不変条件 1・2・5
 import { and, asc, eq, isNull } from "drizzle-orm";
+import { deriveBalance } from "../domain/balance";
 import { validateTransaction } from "../domain/validate-transaction";
 import type { Account, Transaction } from "../domain/types";
 import { listAccounts } from "./accounts-repository";
@@ -10,7 +11,7 @@ import { listCards } from "./cards-repository";
 import type { AppDatabase } from "./client";
 import { generateId } from "./id";
 import { normalizeIsoDate } from "./normalize-date";
-import { transactions } from "./schema";
+import { accounts as accountsTable, transactions } from "./schema";
 
 type TransactionRow = typeof transactions.$inferSelect;
 
@@ -31,6 +32,17 @@ function toDomain(row: TransactionRow): Transaction {
   };
 }
 
+function assertValidAgainst(
+  tx: Pick<Transaction, "amount" | "type" | "fromAccountId" | "toAccountId" | "cardId">,
+  accounts: Account[],
+  cards: Awaited<ReturnType<typeof listCards>>
+): void {
+  const result = validateTransaction(tx, accounts, cards);
+  if (!result.ok) {
+    throw new Error(`invalid transaction: ${result.reason}`);
+  }
+}
+
 /** 保存対象の取引を検証する。accounts/cards は DB から都度読み直す（残高キャッシュを持たないのと同じ考え方）。 */
 async function assertValid(
   db: AppDatabase,
@@ -40,10 +52,7 @@ async function assertValid(
     listAccounts(db, { includeArchived: true }),
     listCards(db),
   ]);
-  const result = validateTransaction(tx, accounts, cards);
-  if (!result.ok) {
-    throw new Error(`invalid transaction: ${result.reason}`);
-  }
+  assertValidAgainst(tx, accounts, cards);
 }
 
 type AccountReferences = Pick<Transaction, "fromAccountId" | "toAccountId">;
@@ -78,13 +87,8 @@ export type NewTransactionInput = Omit<
   "id" | "createdAt" | "updatedAt" | "deletedAt"
 > & { id?: string };
 
-export async function insertTransaction(
-  db: AppDatabase,
-  input: NewTransactionInput
-): Promise<Transaction> {
-  await assertValid(db, input);
-  const now = new Date().toISOString();
-  const row: TransactionRow = {
+function buildTransactionRow(input: NewTransactionInput, now: string): TransactionRow {
+  return {
     id: input.id ?? generateId(),
     date: normalizeIsoDate(input.date),
     amount: input.amount,
@@ -98,8 +102,100 @@ export async function insertTransaction(
     updatedAt: now,
     deletedAt: null,
   };
-  await db.insert(transactions).values(row);
-  return toDomain(row);
+}
+
+/** 複数取引を全件検証後、1つのSQLite transactionで保存する。 */
+export async function insertTransactionsAtomically(
+  db: AppDatabase,
+  inputs: NewTransactionInput[]
+): Promise<Transaction[]> {
+  if (inputs.length === 0) return [];
+  const [accountList, cardList] = await Promise.all([
+    listAccounts(db, { includeArchived: true }),
+    listCards(db),
+  ]);
+  for (const input of inputs) assertValidAgainst(input, accountList, cardList);
+
+  const now = new Date().toISOString();
+  const rows = inputs.map((input) => buildTransactionRow(input, now));
+  db.transaction((tx) => {
+    const activeTransactions = tx
+      .select()
+      .from(transactions)
+      .where(isNull(transactions.deletedAt))
+      .all()
+      .map(toDomain);
+    // 日付単位の残高では同日の非transfer取引もすべて反映されるため、
+    // DBのルール列順に依存しないようbatch内の非transferを先に計算対象へ含める。
+    const balanceTransactions = [
+      ...activeTransactions,
+      ...rows.filter((row) => row.type !== "transfer").map(toDomain),
+    ];
+
+    for (const row of rows.filter((candidate) => candidate.type !== "transfer")) {
+      tx.insert(transactions).values(row).run();
+    }
+
+    const transfersByDate = new Map<string, TransactionRow[]>();
+    for (const row of rows
+      .filter((candidate) => candidate.type === "transfer")
+      .sort((a, b) => a.date.localeCompare(b.date))) {
+      const sameDay = transfersByDate.get(row.date) ?? [];
+      sameDay.push(row);
+      transfersByDate.set(row.date, sameDay);
+    }
+    for (const sameDayRows of transfersByDate.values()) {
+      for (const row of sameDayRows) {
+        const fromAccount = tx
+          .select()
+          .from(accountsTable)
+          .where(eq(accountsTable.id, row.fromAccountId as string))
+          .get();
+        const toAccount = tx
+          .select()
+          .from(accountsTable)
+          .where(eq(accountsTable.id, row.toAccountId as string))
+          .get();
+        if (
+          !fromAccount ||
+          !toAccount ||
+          fromAccount.type !== "budget" ||
+          toAccount.type !== "budget"
+        ) {
+          throw new Error("invalid transfer accounts");
+        }
+        if (fromAccount.archivedAt !== null || toAccount.archivedAt !== null) {
+          throw new Error("終了済みの予算には移動できません");
+        }
+      }
+      const sameDayTransactions = sameDayRows.map(toDomain);
+      const afterSameDay = [...balanceTransactions, ...sameDayTransactions];
+      const fromAccountIds = new Set(
+        sameDayRows.map((row) => row.fromAccountId as string)
+      );
+      const hasNegativeBalance = [...fromAccountIds].some(
+        (accountId) => deriveBalance(accountId, afterSameDay, sameDayRows[0].date) < 0
+      );
+      if (hasNegativeBalance) {
+        throw new Error(
+          "移動元の残高が不足しています。同日の予算移動を成立させられません"
+        );
+      }
+      for (const row of sameDayRows) {
+        tx.insert(transactions).values(row).run();
+        balanceTransactions.push(toDomain(row));
+      }
+    }
+  });
+  return rows.map(toDomain);
+}
+
+export async function insertTransaction(
+  db: AppDatabase,
+  input: NewTransactionInput
+): Promise<Transaction> {
+  const [created] = await insertTransactionsAtomically(db, [input]);
+  return created;
 }
 
 export type TransactionPatch = Partial<
@@ -123,6 +219,21 @@ export async function updateTransaction(
     toAccountId: patch.toAccountId !== undefined ? patch.toAccountId : existing.toAccountId,
     cardId: patch.cardId !== undefined ? patch.cardId : existing.cardId,
   };
+  if (existing.type === "transfer" || merged.type === "transfer") {
+    throw new Error("振替は直接変更できません。削除して正しい内容を記録してください");
+  }
+  if (
+    patch.recurringRuleId !== undefined &&
+    patch.recurringRuleId !== existing.recurringRuleId
+  ) {
+    throw new Error("定期取引との関連は直接変更できません");
+  }
+  if (existing.recurringRuleId !== null && patch.date !== undefined) {
+    const normalizedDate = normalizeIsoDate(patch.date);
+    if (normalizedDate.slice(0, 7) !== existing.date.slice(0, 7)) {
+      throw new Error("定期取引は別の月へ移動できません");
+    }
+  }
   await assertNoArchivedBudgetReferences(db, existing, "変更");
   await assertNoArchivedBudgetReferences(db, merged, "変更");
   await assertValid(db, merged);

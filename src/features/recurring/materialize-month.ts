@@ -2,11 +2,12 @@ import { listRecurringRules } from "../../db/recurring-rules-repository";
 import { listAccounts } from "../../db/accounts-repository";
 import type { AppDatabase } from "../../db/client";
 import {
-  insertTransaction,
+  insertTransactionsAtomically,
   listTransactions,
 } from "../../db/transactions-repository";
+import type { NewTransactionInput } from "../../db/transactions-repository";
 import { expandRecurring } from "../../domain/recurring";
-import type { Transaction, YearMonth } from "../../domain/types";
+import type { Account, RecurringRule, Transaction, YearMonth } from "../../domain/types";
 
 export type RecurringMaterializationResult = {
   created: Transaction[];
@@ -39,6 +40,44 @@ function localIsoDate(now: Date): string {
 }
 
 /**
+ * 復旧前は account.monthlyBudget と月初 income rule を別々に保存できたため、
+ * 旧 DB/backup では両者が一致するとは限らない。不一致を自動修復すると、どちらを
+ * 正とするかをアプリが勝手に決めることになるため、実取引を1件も書く前に拒否する。
+ */
+function assertMonthlyBudgetRuleConsistency(
+  activeAccounts: Account[],
+  rules: RecurringRule[],
+): void {
+  for (const account of activeAccounts) {
+    if (account.type !== "budget") continue;
+
+    const monthlyRules = rules.filter(
+      (rule) =>
+        rule.type === "income" &&
+        rule.fromAccountId === null &&
+        rule.toAccountId === account.id &&
+        rule.cardId === null &&
+        rule.dayOfMonth === 1,
+    );
+    const amounts = monthlyRules.map((rule) => rule.amount);
+    const consistent =
+      account.monthlyBudget === 0
+        ? monthlyRules.length === 0
+        : account.monthlyBudget > 0 &&
+          monthlyRules.length === 1 &&
+          monthlyRules[0].amount === account.monthlyBudget;
+
+    if (!consistent) {
+      throw new Error(
+        `毎月の予算設定が一致していません。「${account.name}」を設定で編集し、` +
+          `金額を確認して保存してください（予算: ${account.monthlyBudget}円、` +
+          `自動充当: ${amounts.length === 0 ? "未設定" : `${amounts.join("円・")}円`}）。`,
+      );
+    }
+  }
+}
+
+/**
  * 全定期ルールを対象月の実取引へ変換する。
  *
  * 同じ recurringRuleId の取引が対象月に一度でも生成済みならスキップする。
@@ -55,6 +94,7 @@ async function materialize(
     listAccounts(db),
   ]);
   const activeAccountIds = new Set(activeAccounts.map((account) => account.id));
+  assertMonthlyBudgetRuleConsistency(activeAccounts, rules);
   const materializedRuleIds = new Set(
     transactions
       .filter(
@@ -65,7 +105,7 @@ async function materialize(
       .map((transaction) => transaction.recurringRuleId as string),
   );
 
-  const created: Transaction[] = [];
+  const inputs: NewTransactionInput[] = [];
   let skipped = 0;
   for (const rule of rules) {
     const referencesInactiveAccount =
@@ -88,10 +128,11 @@ async function materialize(
       skipped += 1;
       continue;
     }
-    created.push(await insertTransaction(db, draft));
+    inputs.push(draft);
     materializedRuleIds.add(rule.id);
   }
 
+  const created = await insertTransactionsAtomically(db, inputs);
   return { created, skipped };
 }
 

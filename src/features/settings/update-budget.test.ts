@@ -10,9 +10,11 @@ import { createTestDb } from "../../db/test-utils";
 import {
   insertTransaction,
   listTransactions,
+  softDeleteTransaction,
 } from "../../db/transactions-repository";
 
 import { updateBudgetAndMonthlyRule } from "./update-budget";
+import { materializeRecurringRulesForMonth } from "../recurring/materialize-month";
 
 async function createBudget(monthlyBudget = 0) {
   const db = createTestDb();
@@ -124,6 +126,266 @@ describe("updateBudgetAndMonthlyRule", () => {
     });
     expect(await listRecurringRules(db)).toHaveLength(1);
     expect(await listTransactions(db)).toEqual([]);
+  });
+
+  it("欠損した旧ルールIDを当月の生成済み取引から引き継ぎ二重充当を防ぐ", async () => {
+    const { account, db } = await createBudget(10_000);
+    const orphan = await addMaterializedIncome(db, account.id, "missing-rule", 10_000);
+
+    const result = await updateBudgetAndMonthlyRule(db, account.id, {
+      name: account.name,
+      monthlyBudget: 12_000,
+    });
+
+    expect(result.monthlyRule?.id).toBe("missing-rule");
+    expect(await listTransactions(db)).toMatchObject([
+      { id: orphan.id, amount: 12_000, recurringRuleId: "missing-rule" },
+    ]);
+  });
+
+  it("欠損した旧ルールの削除marker IDを引き継ぎ、削除状態を保つ", async () => {
+    const { account, db } = await createBudget(10_000);
+    const orphan = await addMaterializedIncome(db, account.id, "missing-rule", 10_000);
+    await softDeleteTransaction(db, orphan.id);
+
+    const result = await updateBudgetAndMonthlyRule(db, account.id, {
+      name: account.name,
+      monthlyBudget: 12_000,
+    });
+
+    expect(result.monthlyRule?.id).toBe("missing-rule");
+    expect(await listTransactions(db)).toEqual([]);
+    expect(await listTransactions(db, { includeDeleted: true })).toMatchObject([
+      { id: orphan.id, deletedAt: expect.any(String), recurringRuleId: "missing-rule" },
+    ]);
+  });
+
+  it("0円保存では欠損した旧ルールの当月active充当も論理削除する", async () => {
+    const { account, db } = await createBudget(10_000);
+    const orphan = await addMaterializedIncome(db, account.id, "missing-rule", 10_000);
+
+    await updateBudgetAndMonthlyRule(db, account.id, {
+      name: account.name,
+      monthlyBudget: 0,
+    });
+
+    expect(await listTransactions(db)).toEqual([]);
+    expect(await listTransactions(db, { includeDeleted: true })).toMatchObject([
+      { id: orphan.id, deletedAt: expect.any(String) },
+    ]);
+  });
+
+  it("有効ルールと単一の旧orphanが併存する場合は明示保存でorphanを論理削除する", async () => {
+    const { account, db } = await createBudget(10_000);
+    const rule = await addMonthlyRule(db, "rule-current", account.id, 10_000);
+    await addMaterializedIncome(db, account.id, rule.id, 10_000);
+    const orphan = await addMaterializedIncome(db, account.id, "rule-missing", 10_000);
+
+    await updateBudgetAndMonthlyRule(db, account.id, {
+      name: account.name,
+      monthlyBudget: 12_000,
+    });
+
+    expect(await listTransactions(db)).toMatchObject([
+      { recurringRuleId: rule.id, amount: 12_000 },
+    ]);
+    expect(await listTransactions(db, { includeDeleted: true })).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: orphan.id, deletedAt: expect.any(String) }),
+      ])
+    );
+  });
+
+  it("重複ルール整理後のtombstoneをkeeperへ統合し、次回も保存できる", async () => {
+    const { account, db } = await createBudget(10_000);
+    for (const id of ["rule-first", "rule-second", "rule-third"]) {
+      const rule = await addMonthlyRule(db, id, account.id, 10_000);
+      await addMaterializedIncome(db, account.id, rule.id, 10_000);
+    }
+
+    await updateBudgetAndMonthlyRule(db, account.id, {
+      name: account.name,
+      monthlyBudget: 20_000,
+    });
+    await expect(
+      updateBudgetAndMonthlyRule(db, account.id, {
+        name: account.name,
+        monthlyBudget: 30_000,
+      })
+    ).resolves.toMatchObject({ monthlyRule: { id: "rule-first", amount: 30_000 } });
+
+    const all = await listTransactions(db, { includeDeleted: true });
+    expect(all.every((transaction) => transaction.recurringRuleId === "rule-first")).toBe(true);
+    expect(all.filter((transaction) => transaction.deletedAt === null)).toHaveLength(1);
+  });
+
+  it("keeper側markerがなくてもduplicate側の唯一のactive充当を引き継ぐ", async () => {
+    const { account, db } = await createBudget(10_000);
+    await addMonthlyRule(db, "rule-first", account.id, 10_000);
+    const duplicate = await addMonthlyRule(db, "rule-second", account.id, 10_000);
+    const materialized = await addMaterializedIncome(db, account.id, duplicate.id, 10_000);
+
+    await updateBudgetAndMonthlyRule(db, account.id, {
+      name: account.name,
+      monthlyBudget: 20_000,
+    });
+
+    expect(await listTransactions(db)).toMatchObject([
+      { id: materialized.id, recurringRuleId: "rule-first", amount: 20_000 },
+    ]);
+    expect(await listRecurringRules(db)).toMatchObject([
+      { id: "rule-first", amount: 20_000 },
+    ]);
+  });
+
+  it("keeper側markerがなくても単一active orphanをkeeperへ引き継ぐ", async () => {
+    const { account, db } = await createBudget(10_000);
+    await addMonthlyRule(db, "rule-first", account.id, 10_000);
+    const orphan = await addMaterializedIncome(db, account.id, "rule-missing", 10_000);
+
+    await updateBudgetAndMonthlyRule(db, account.id, {
+      name: account.name,
+      monthlyBudget: 20_000,
+    });
+
+    expect(await listTransactions(db)).toMatchObject([
+      { id: orphan.id, recurringRuleId: "rule-first", amount: 20_000 },
+    ]);
+  });
+
+  it("duplicate ruleの過去月markerもkeeperへ統合して再生成を防ぐ", async () => {
+    const { account, db } = await createBudget(10_000);
+    await addMonthlyRule(db, "rule-first", account.id, 10_000);
+    const duplicate = await addMonthlyRule(db, "rule-second", account.id, 10_000);
+    const past = await insertTransaction(db, {
+      date: "2026-06-01", amount: 10_000, type: "income", fromAccountId: null,
+      toAccountId: account.id, cardId: null, memo: "月初充当", recurringRuleId: duplicate.id,
+    });
+
+    await updateBudgetAndMonthlyRule(db, account.id, {
+      name: account.name,
+      monthlyBudget: 20_000,
+    });
+
+    expect(await listTransactions(db)).toMatchObject([
+      { id: past.id, date: "2026-06-01", amount: 10_000, recurringRuleId: "rule-first" },
+    ]);
+    await expect(materializeRecurringRulesForMonth(db, "2026-06")).resolves.toMatchObject({
+      created: [],
+      skipped: 1,
+    });
+  });
+
+  it("旧版の複数世代markerを明示保存で現行ruleへ統合する", async () => {
+    const { account, db } = await createBudget(10_000);
+    const current = await addMonthlyRule(db, "rule-current", account.id, 10_000);
+    await insertTransaction(db, {
+      date: "2026-05-01", amount: 10_000, type: "income", fromAccountId: null,
+      toAccountId: account.id, cardId: null, memo: "月初充当", recurringRuleId: "rule-old-1",
+    });
+    await insertTransaction(db, {
+      date: "2026-06-01", amount: 10_000, type: "income", fromAccountId: null,
+      toAccountId: account.id, cardId: null, memo: "月初充当", recurringRuleId: "rule-old-2",
+    });
+
+    await expect(
+      updateBudgetAndMonthlyRule(db, account.id, {
+        name: account.name,
+        monthlyBudget: 20_000,
+      })
+    ).resolves.toMatchObject({ monthlyRule: { id: current.id, amount: 20_000 } });
+
+    expect(
+      (await listTransactions(db)).every(
+        (transaction) => transaction.recurringRuleId === current.id
+      )
+    ).toBe(true);
+  });
+
+  it("同月内で日付訂正された現行rule markerも新しい月額へ更新する", async () => {
+    const { account, db } = await createBudget(10_000);
+    const rule = await addMonthlyRule(db, "rule-current", account.id, 10_000);
+    const moved = await insertTransaction(db, {
+      date: currentMonthDate().replace(/-01$/, "-05"),
+      amount: 10_000,
+      type: "income",
+      fromAccountId: null,
+      toAccountId: account.id,
+      cardId: null,
+      memo: "月初充当",
+      recurringRuleId: rule.id,
+    });
+
+    await updateBudgetAndMonthlyRule(db, account.id, {
+      name: account.name,
+      monthlyBudget: 20_000,
+    });
+
+    expect(await listTransactions(db)).toMatchObject([
+      { id: moved.id, date: expect.stringMatching(/-05$/), amount: 20_000 },
+    ]);
+  });
+
+  it("同月別日へ訂正済みの欠損rule markerも新ruleへ引き継ぐ", async () => {
+    const { account, db } = await createBudget(10_000);
+    const orphan = await insertTransaction(db, {
+      date: currentMonthDate().replace(/-01$/, "-05"),
+      amount: 10_000,
+      type: "income",
+      fromAccountId: null,
+      toAccountId: account.id,
+      cardId: null,
+      memo: "月初充当",
+      recurringRuleId: "rule-missing",
+    });
+
+    const result = await updateBudgetAndMonthlyRule(db, account.id, {
+      name: account.name,
+      monthlyBudget: 20_000,
+    });
+
+    expect(result.monthlyRule?.id).toBe("rule-missing");
+    expect(await listTransactions(db)).toMatchObject([
+      { id: orphan.id, date: expect.stringMatching(/-05$/), amount: 20_000 },
+    ]);
+  });
+
+  it("現存する別日ruleの削除markerを月初ruleへ誤統合しない", async () => {
+    const { account, db } = await createBudget(10_000);
+    const monthly = await addMonthlyRule(db, "rule-monthly", account.id, 10_000);
+    await addMaterializedIncome(db, account.id, monthly.id, 10_000);
+    const other = await insertRecurringRule(db, {
+      id: "rule-other-day",
+      type: "income",
+      amount: 500,
+      fromAccountId: null,
+      toAccountId: account.id,
+      cardId: null,
+      memo: "月初充当",
+      dayOfMonth: 5,
+    });
+    const deleted = await insertTransaction(db, {
+      date: currentMonthDate().replace(/-01$/, "-05"),
+      amount: 500,
+      type: "income",
+      fromAccountId: null,
+      toAccountId: account.id,
+      cardId: null,
+      memo: "月初充当",
+      recurringRuleId: other.id,
+    });
+    await softDeleteTransaction(db, deleted.id);
+
+    await updateBudgetAndMonthlyRule(db, account.id, {
+      name: account.name,
+      monthlyBudget: 20_000,
+    });
+
+    expect(
+      (await listTransactions(db, { includeDeleted: true })).find(
+        (transaction) => transaction.id === deleted.id
+      )
+    ).toMatchObject({ recurringRuleId: other.id, deletedAt: expect.any(String) });
   });
 
   it("当月の月初取引が生成済みならルールと同額へ更新する", async () => {

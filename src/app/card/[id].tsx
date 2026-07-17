@@ -16,13 +16,19 @@ import { ThemedView } from "@/components/themed-view";
 import { useDb } from "@/db/provider";
 import { getCardById } from "@/db/cards-repository";
 import { insertTransaction, listTransactions } from "@/db/transactions-repository";
-import { deriveCardStatement, type Card, type CardStatement, type Transaction } from "@/domain";
+import {
+  deriveCardPreparedAmount,
+  deriveCardPreparedChange,
+  isCardPreparedTransaction,
+  type Card,
+  type Transaction,
+} from "@/domain";
 import { buildCardSettlementTransactions } from "@/features/cards/settlement";
 
 type ScreenState =
   | { status: "loading" }
   | { status: "notFound" }
-  | { status: "ready"; card: Card; statement: CardStatement; transactions: Transaction[] }
+  | { status: "ready"; card: Card; preparedAmount: number; transactions: Transaction[] }
   | { status: "error"; message: string };
 
 function formatYen(amount: number): string {
@@ -43,7 +49,8 @@ function todayIsoDate(): string {
 
 function parseAmount(text: string): number | null {
   if (!/^[1-9]\d*$/.test(text.trim())) return null;
-  return Number(text);
+  const amount = Number(text);
+  return Number.isSafeInteger(amount) ? amount : null;
 }
 
 export default function CardDetailScreen() {
@@ -71,14 +78,16 @@ export default function CardDetailScreen() {
         setState({ status: "notFound" });
         return;
       }
-      const statement = deriveCardStatement(card, transactions, todayIsoDate());
+      const preparedAmount = deriveCardPreparedAmount(card, transactions, todayIsoDate());
       setState({
         status: "ready",
         card,
-        statement,
-        transactions: transactions.filter((transaction) => transaction.cardId === card.id).reverse(),
+        preparedAmount,
+        transactions: transactions
+          .filter((transaction) => isCardPreparedTransaction(card, transaction))
+          .reverse(),
       });
-      setPaidAmountText(String(Math.max(statement.currentAmount, 0)));
+      setPaidAmountText("");
     } catch (error) {
       setState({ status: "error", message: error instanceof Error ? error.message : String(error) });
     }
@@ -164,40 +173,31 @@ export default function CardDetailScreen() {
 
               <View style={styles.summary}>
                 <View style={styles.row}>
-                  <ThemedText>支払準備済み</ThemedText>
+                  <ThemedText>支払準備総額</ThemedText>
                   <ThemedText type="smallBold" style={styles.amountText}>
-                    {formatYen(state.statement.settlementBalance)}
-                  </ThemedText>
-                </View>
-                <View style={styles.row}>
-                  <ThemedText>今回の引き落とし分</ThemedText>
-                  <ThemedText type="smallBold" style={styles.amountText}>
-                    {formatYen(state.statement.currentAmount)}
-                  </ThemedText>
-                </View>
-                <View style={styles.row}>
-                  <ThemedText>次回以降の利用分</ThemedText>
-                  <ThemedText type="smallBold" style={styles.amountText}>
-                    {formatYen(state.statement.nextAmount)}
+                    {formatYen(state.preparedAmount)}
                   </ThemedText>
                 </View>
               </View>
 
-              {state.statement.currentAmount < 0 ? (
+              {state.preparedAmount < 0 ? (
                 <ThemedText style={styles.warning}>
-                  今回請求分が負です。過払いまたは取引不整合の可能性があります。
+                  支払準備総額が負です。過払いまたは取引不整合の可能性があります。
                 </ThemedText>
               ) : null}
 
               <View style={styles.settlement}>
                 <ThemedText type="smallBold">実際の引き落とし額</ThemedText>
+                <ThemedText type="small" themeColor="textSecondary">
+                  カード会社の明細を確認して、実際の金額を入力してください。支払準備総額は請求額の推定ではありません。
+                </ThemedText>
                 <TextInput
                   value={paidAmountText}
                   onChangeText={setPaidAmountText}
                   keyboardType="number-pad"
                   inputMode="numeric"
                   style={styles.input}
-                  placeholder="金額"
+                  placeholder="明細の引き落とし額"
                 />
                 <Pressable
                   accessibilityRole="button"
@@ -227,7 +227,7 @@ export default function CardDetailScreen() {
                       <ThemedText>{transaction.memo || (transaction.type === 'card_debit' ? 'カード引き落とし' : 'カード利用')}</ThemedText>
                       <ThemedText type="small" themeColor="textSecondary">{transaction.date}</ThemedText>
                     </View>
-                    <ThemedText>{transaction.type === 'card_debit' ? '-' : ''}{formatYen(transaction.amount)}</ThemedText>
+                    <ThemedText>{formatYen(deriveCardPreparedChange(state.card, transaction))}</ThemedText>
                   </Pressable>
                 ))}
               </View>

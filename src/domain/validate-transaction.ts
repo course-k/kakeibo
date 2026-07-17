@@ -135,6 +135,14 @@ function validateByType(
       if (hasTo && !findAccount(accounts, tx.toAccountId)) {
         return { ok: false, reason: "to_account_not_found" };
       }
+      if (tx.cardId != null) {
+        const adjustedAccountId = hasFrom ? tx.fromAccountId : tx.toAccountId;
+        const adjustedAccount = findAccount(accounts, adjustedAccountId);
+        if (adjustedAccount?.type !== "card_settlement") {
+          return { ok: false, reason: "card_settlement_mismatch" };
+        }
+        return checkCardLink(tx.cardId, adjustedAccountId, cards);
+      }
       return { ok: true };
     }
   }
@@ -153,7 +161,12 @@ export function validateTransaction(
   cards: Card[]
 ): ValidationResult {
   if (!isValidAmount(tx.amount)) return { ok: false, reason: "invalid_amount" };
-  if (tx.type !== "expense_card" && tx.type !== "card_debit" && tx.cardId != null) {
+  if (
+    tx.type !== "expense_card" &&
+    tx.type !== "card_debit" &&
+    tx.type !== "adjustment" &&
+    tx.cardId != null
+  ) {
     return { ok: false, reason: "unexpected_card" };
   }
   return validateByType(tx.type, tx, accounts, cards);

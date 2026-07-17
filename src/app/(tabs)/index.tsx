@@ -154,13 +154,10 @@ function HomeContent({ viewModel }: { viewModel: HomeViewModel }) {
                 </View>
                 <View style={styles.cardAmount}>
                   <ThemedText type="small" themeColor="textSecondary">
-                    支払い準備済み
+                    支払準備総額
                   </ThemedText>
                   <ThemedText style={card.needsAttention ? styles.warningText : undefined}>
                     {formatYen(card.preparedAmount)}
-                  </ThemedText>
-                  <ThemedText type="small" themeColor="textSecondary">
-                    今回分 {formatYen(card.currentAmount)}
                   </ThemedText>
                   {card.needsAttention ? (
                     <ThemedText type="small" style={styles.warningText}>

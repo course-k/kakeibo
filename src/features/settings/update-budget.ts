@@ -1,4 +1,4 @@
-import { and, eq, isNull, like } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 
 import type { AppDatabase } from "../../db/client";
 import { generateId } from "../../db/id";
@@ -50,26 +50,43 @@ export async function updateBudgetAndMonthlyRule(
       )
       .all();
     const monthlyRuleIds = new Set(monthlyRules.map((rule) => rule.id));
-    const currentMonthTransactions =
-      monthlyRuleIds.size === 0
-        ? []
-        : tx
-            .select()
-            .from(transactions)
-            .where(
-              and(
-                eq(transactions.type, "income"),
-                eq(transactions.toAccountId, accountId),
-                like(transactions.date, `${localYearMonth()}-%`),
-                isNull(transactions.deletedAt)
-              )
-            )
-            .all()
-            .filter(
-              (transaction) =>
-                transaction.recurringRuleId !== null &&
-                monthlyRuleIds.has(transaction.recurringRuleId)
-            );
+    const knownRuleIds = new Set(
+      tx.select({ id: recurringRules.id }).from(recurringRules).all().map((rule) => rule.id)
+    );
+    const currentMonth = localYearMonth();
+    const allStructuralIncomeTransactions = tx
+      .select()
+      .from(transactions)
+      .where(
+        and(
+          eq(transactions.type, "income"),
+          eq(transactions.toAccountId, accountId),
+          isNull(transactions.fromAccountId),
+          isNull(transactions.cardId)
+        )
+      )
+      .all()
+      .filter((transaction) => transaction.recurringRuleId !== null);
+    const ruleTransactions = allStructuralIncomeTransactions.filter((transaction) =>
+      monthlyRuleIds.has(transaction.recurringRuleId as string)
+    );
+    const allCurrentMonthTransactions = ruleTransactions.filter(
+      (transaction) => transaction.date.slice(0, 7) === currentMonth
+    );
+    const currentMonthTransactions = allCurrentMonthTransactions.filter(
+      (transaction) => transaction.deletedAt === null
+    );
+    const orphanMonthlyTransactions = allStructuralIncomeTransactions.filter(
+      (transaction) =>
+        transaction.memo === "月初充当" &&
+        !knownRuleIds.has(transaction.recurringRuleId as string)
+    );
+    const currentMonthOrphans = orphanMonthlyTransactions.filter(
+      (transaction) => transaction.date.slice(0, 7) === currentMonth
+    );
+    const activeOrphans = currentMonthOrphans.filter(
+      (transaction) => transaction.deletedAt === null
+    );
 
     const updatedAt = new Date().toISOString();
     tx.update(accounts)
@@ -79,12 +96,25 @@ export async function updateBudgetAndMonthlyRule(
 
     let monthlyRule: RecurringRule | null = null;
     if (input.monthlyBudget === 0) {
+      const markerId =
+        monthlyRules[0]?.id ?? orphanMonthlyTransactions[0]?.recurringRuleId ?? undefined;
       for (const rule of monthlyRules) {
         tx.delete(recurringRules).where(eq(recurringRules.id, rule.id)).run();
       }
-      for (const transaction of currentMonthTransactions) {
+      for (const transaction of [
+        ...ruleTransactions,
+        ...orphanMonthlyTransactions,
+      ]) {
+        const isCurrentMonth = transaction.date.slice(0, 7) === currentMonth;
         tx.update(transactions)
-          .set({ deletedAt: updatedAt, updatedAt })
+          .set({
+            deletedAt:
+              isCurrentMonth && transaction.deletedAt === null
+                ? updatedAt
+                : transaction.deletedAt,
+            updatedAt,
+            ...(markerId ? { recurringRuleId: markerId } : {}),
+          })
           .where(eq(transactions.id, transaction.id))
           .run();
       }
@@ -100,28 +130,45 @@ export async function updateBudgetAndMonthlyRule(
       const keeperTransactions = currentMonthTransactions.filter(
         (transaction) => transaction.recurringRuleId === keeper.id
       );
-      const [keeperTransaction, ...duplicateKeeperTransactions] = keeperTransactions;
+      const keeperTransaction =
+        keeperTransactions[0] ?? currentMonthTransactions[0] ?? activeOrphans[0];
       if (keeperTransaction) {
         tx.update(transactions)
-          .set({ amount: input.monthlyBudget, updatedAt })
+          .set({
+            amount: input.monthlyBudget,
+            recurringRuleId: keeper.id,
+            updatedAt,
+          })
           .where(eq(transactions.id, keeperTransaction.id))
           .run();
       }
-      for (const transaction of currentMonthTransactions) {
-        if (
-          transaction.recurringRuleId !== keeper.id ||
-          duplicateKeeperTransactions.some((duplicate) => duplicate.id === transaction.id)
-        ) {
+      for (const transaction of [
+        ...ruleTransactions,
+        ...orphanMonthlyTransactions,
+      ]) {
+        if (transaction.id !== keeperTransaction?.id) {
+          const isCurrentMonth = transaction.date.slice(0, 7) === currentMonth;
           tx.update(transactions)
-            .set({ deletedAt: updatedAt, updatedAt })
+            .set({
+              deletedAt:
+                isCurrentMonth && transaction.deletedAt === null
+                  ? updatedAt
+                  : transaction.deletedAt,
+              updatedAt,
+              recurringRuleId: keeper.id,
+            })
             .where(eq(transactions.id, transaction.id))
             .run();
         }
       }
       monthlyRule = toRecurringRule({ ...keeper, amount: input.monthlyBudget });
     } else {
+      const orphan =
+        activeOrphans[0] ?? currentMonthOrphans[0] ?? orphanMonthlyTransactions[0];
       const row: typeof recurringRules.$inferInsert = {
-        id: generateId(),
+        // 旧データに生成済み/削除済みmarkerが1件だけあればIDを引き継ぎ、
+        // 二重充当や削除済み取引の復活を防ぐ。
+        id: orphan?.recurringRuleId ?? generateId(),
         type: "income",
         amount: input.monthlyBudget,
         fromAccountId: null,
@@ -131,6 +178,23 @@ export async function updateBudgetAndMonthlyRule(
         dayOfMonth: 1,
       };
       tx.insert(recurringRules).values(row).run();
+      for (const transaction of orphanMonthlyTransactions) {
+        const isCurrentMonth = transaction.date.slice(0, 7) === currentMonth;
+        const isKeeper = transaction.id === orphan?.id;
+        tx.update(transactions)
+          .set({
+            recurringRuleId: row.id,
+            updatedAt,
+            ...(isCurrentMonth && isKeeper && transaction.deletedAt === null
+              ? { amount: input.monthlyBudget }
+              : {}),
+            ...(isCurrentMonth && !isKeeper && transaction.deletedAt === null
+              ? { deletedAt: updatedAt }
+              : {}),
+          })
+          .where(eq(transactions.id, transaction.id))
+          .run();
+      }
       monthlyRule = toRecurringRule(row);
     }
 

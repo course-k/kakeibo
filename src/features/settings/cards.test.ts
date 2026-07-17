@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import { listAccounts } from "../../db/accounts-repository";
 import { listCards } from "../../db/cards-repository";
 import { createTestDb } from "../../db/test-utils";
-import { createCardWithSettlementAccount } from "./cards";
+import { accounts as accountsTable } from "../../db/schema";
+import { eq } from "drizzle-orm";
+import { createCardWithSettlementAccount, updateCardSettings } from "./cards";
 
 describe("createCardWithSettlementAccount", () => {
   it("card_settlement 口座を作成し settlementAccountId でカードへ紐づける", async () => {
@@ -40,5 +42,62 @@ describe("createCardWithSettlementAccount", () => {
 
     expect(await listAccounts(db, { includeArchived: true })).toEqual([]);
     expect(await listCards(db)).toEqual([]);
+  });
+
+  it("カード名と支払準備口座名を同じトランザクションで更新する", async () => {
+    const db = createTestDb();
+    const created = await createCardWithSettlementAccount(db, {
+      name: "カードA",
+      closingDay: 15,
+      debitDay: 27,
+      sortOrder: 10,
+    });
+
+    const updated = await updateCardSettings(db, created.card.id, {
+      name: "生活カード",
+      closingDay: 20,
+    });
+
+    expect(updated.name).toBe("生活カード");
+    expect(updated.closingDay).toBe(20);
+    const settlement = (await listAccounts(db, { includeArchived: true })).find(
+      (account) => account.id === created.settlementAccount.id
+    );
+    expect(settlement?.name).toBe("生活カード 支払準備");
+  });
+
+  it("支払準備口座IDの変更を拒否する", async () => {
+    const db = createTestDb();
+    const created = await createCardWithSettlementAccount(db, {
+      name: "カードA",
+      closingDay: 15,
+      debitDay: 27,
+      sortOrder: 10,
+    });
+
+    await expect(
+      updateCardSettings(db, created.card.id, {
+        settlementAccountId: "other-account",
+      } as Parameters<typeof updateCardSettings>[2])
+    ).rejects.toThrow("支払準備口座は変更できません");
+    expect((await listCards(db))[0].settlementAccountId).toBe(created.settlementAccount.id);
+  });
+
+  it("支払準備口座が欠損している場合はカードだけを更新しない", async () => {
+    const db = createTestDb();
+    const created = await createCardWithSettlementAccount(db, {
+      name: "カードA",
+      closingDay: 15,
+      debitDay: 27,
+      sortOrder: 10,
+    });
+    await db
+      .delete(accountsTable)
+      .where(eq(accountsTable.id, created.settlementAccount.id));
+
+    await expect(
+      updateCardSettings(db, created.card.id, { name: "変更後" })
+    ).rejects.toThrow("支払準備口座が見つかりません");
+    expect((await listCards(db))[0].name).toBe("カードA");
   });
 });
