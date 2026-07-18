@@ -6,9 +6,10 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { listAccounts } from '@/db/accounts-repository';
+import { listCategories } from '@/db/categories-repository';
 import { useDb } from '@/db/provider';
 import { listTransactions } from '@/db/transactions-repository';
-import type { Account, Transaction } from '@/domain/types';
+import type { Account, Category, Transaction } from '@/domain/types';
 import { summarizeMonthlyBudgetExpenses } from '@/features/report/aggregation';
 
 function yen(amount: number): string {
@@ -18,17 +19,20 @@ function yen(amount: number): string {
 export default function ReportScreen() {
   const db = useDb();
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedMonth, setSelectedMonth] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     setLoading(true);
-    const [accountRows, transactionRows] = await Promise.all([
+    const [accountRows, categoryRows, transactionRows] = await Promise.all([
       listAccounts(db, { includeArchived: true }),
+      listCategories(db, { includeArchived: true }),
       listTransactions(db),
     ]);
     setAccounts(accountRows);
+    setCategories(categoryRows);
     setTransactions(transactionRows);
     setLoading(false);
   }, [db]);
@@ -43,12 +47,12 @@ export default function ReportScreen() {
   );
 
   const summary = useMemo(
-    () => summarizeMonthlyBudgetExpenses(accounts, transactions),
-    [accounts, transactions]
+    () => summarizeMonthlyBudgetExpenses(accounts, transactions, categories),
+    [accounts, categories, transactions]
   );
   const months = summary.monthlyTrend.map((item) => item.month);
   const activeMonth = selectedMonth ?? months.at(-1) ?? localYearMonth();
-  const monthlyRows = summary.byAccount.filter((item) => item.month === activeMonth);
+  const monthlyRows = summary.byCategory.filter((item) => item.month === activeMonth);
   const maxAccountAmount = Math.max(1, ...monthlyRows.map((item) => item.amount));
   const maxTrendAmount = Math.max(1, ...summary.monthlyTrend.map((item) => item.amount));
 
@@ -71,11 +75,11 @@ export default function ReportScreen() {
           </View>
 
           <View style={styles.section}>
-            <ThemedText type="subtitle">予算口座別支出 {activeMonth}</ThemedText>
+            <ThemedText type="subtitle">カテゴリ別支出 {activeMonth}</ThemedText>
             {monthlyRows.length === 0 ? <ThemedText>支出はありません</ThemedText> : null}
             {monthlyRows.map((item) => (
-              <View key={`${item.month}:${item.accountId}`} style={styles.barRow}>
-                <ThemedText style={styles.barLabel}>{item.accountName}</ThemedText>
+              <View key={`${item.month}:${item.categoryId}`} style={styles.barRow}>
+                <ThemedText style={styles.barLabel}>{item.categoryName}</ThemedText>
                 <View style={styles.barTrack}>
                   <View style={[styles.barFill, { width: `${(item.amount / maxAccountAmount) * 100}%` }]} />
                 </View>

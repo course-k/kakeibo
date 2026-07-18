@@ -7,6 +7,7 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { listAccounts } from '@/db/accounts-repository';
 import { listCards } from '@/db/cards-repository';
+import { listCategories } from '@/db/categories-repository';
 import { useDb } from '@/db/provider';
 import { listTransactions } from '@/db/transactions-repository';
 import {
@@ -28,13 +29,14 @@ export default function HomeScreen() {
       async function loadHome() {
         try {
           await materializeRecurringRulesForCurrentMonth(db);
-          const [accounts, cards, transactions] = await Promise.all([
+          const [accounts, cards, categories, transactions] = await Promise.all([
             listAccounts(db, { includeArchived: true }),
             listCards(db),
+            listCategories(db, { includeArchived: true }),
             listTransactions(db),
           ]);
           if (!active) return;
-          setViewModel(buildHomeViewModel(accounts, cards, transactions, getTodayIsoDate()));
+          setViewModel(buildHomeViewModel(accounts, cards, transactions, getTodayIsoDate(), categories));
           setErrorMessage(null);
         } catch (error) {
           if (!active) return;
@@ -60,10 +62,10 @@ export default function HomeScreen() {
 
           <View style={styles.quickActions}>
             <Pressable style={styles.inputButton} onPress={() => router.push('/input')}>
-              <ThemedText style={styles.inputButtonText}>支出を記録</ThemedText>
+              <ThemedText style={styles.inputButtonText}>記録する</ThemedText>
             </Pressable>
-            <Pressable style={styles.transferButton} onPress={() => router.push('/transfer')}>
-              <ThemedText style={styles.transferButtonText}>予算を移す</ThemedText>
+            <Pressable style={styles.transferButton} onPress={() => router.push('/recurring')}>
+              <ThemedText style={styles.transferButtonText}>定期記録</ThemedText>
             </Pressable>
           </View>
 
@@ -200,7 +202,7 @@ function RecentTransactionRow({ item }: { item: TransactionHistoryItem }) {
       <View style={styles.historyText}>
         <ThemedText type="smallBold">{item.typeLabel}</ThemedText>
         <ThemedText type="small" themeColor="textSecondary">
-          {formatShortDate(item.date)} ・ {item.accountLabel}
+          {formatShortDate(item.date)} ・ {item.accountLabel}{item.categoryLabel ? ` ・ ${item.categoryLabel}` : ''}
         </ThemedText>
       </View>
       <ThemedText>{formatHistoryAmount(item)}</ThemedText>
@@ -213,6 +215,7 @@ function RecentTransactionRow({ item }: { item: TransactionHistoryItem }) {
     <Pressable
       onPress={() =>
         item.type === 'expense_cash' || item.type === 'expense_card'
+          || item.type === 'income'
           ? router.push({ pathname: '/input', params: { transactionId: item.id } })
           : router.push(`/transaction/${item.id}`)
       }>

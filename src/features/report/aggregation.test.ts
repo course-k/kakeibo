@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Account, Transaction } from "../../domain/types";
+import type { Account, Category, Transaction } from "../../domain/types";
 import { summarizeMonthlyBudgetExpenses } from "./aggregation";
 
 const accounts: Account[] = [
@@ -71,6 +71,27 @@ describe("summarizeMonthlyBudgetExpenses", () => {
     expect(summary.monthlyTrend).toEqual([
       { month: "2026-07", amount: 3500 },
       { month: "2026-08", amount: 700 },
+    ]);
+  });
+
+  it("予算とは独立した支出カテゴリでも集計する", () => {
+    const categories: Category[] = [{
+      id: "food-category",
+      name: "食事",
+      kind: "expense",
+      sortOrder: 0,
+      archivedAt: null,
+      createdAt: "2026-07-01T00:00:00.000Z",
+      updatedAt: "2026-07-01T00:00:00.000Z",
+    }];
+    const summary = summarizeMonthlyBudgetExpenses(accounts, [
+      tx({ id: "categorized", date: "2026-07-03", amount: 1200, type: "expense_cash", fromAccountId: "daily", categoryId: "food-category" }),
+      tx({ id: "uncategorized", date: "2026-07-04", amount: 300, type: "expense_cash", fromAccountId: "food" }),
+    ], categories);
+
+    expect(summary.byCategory).toEqual([
+      { month: "2026-07", categoryId: "food-category", categoryName: "食事", amount: 1200 },
+      { month: "2026-07", categoryId: "uncategorized", categoryName: "未分類", amount: 300 },
     ]);
   });
 });

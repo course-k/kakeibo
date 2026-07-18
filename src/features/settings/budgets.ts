@@ -34,11 +34,13 @@ export async function createBudgetWithMonthlyRule(
     input.monthlyBudget > 0
       ? {
           id: generateId(),
+          ruleKind: "budget_allocation",
           type: "income",
           amount: input.monthlyBudget,
           fromAccountId: null,
           toAccountId: account.id,
           cardId: null,
+          categoryId: null,
           memo: "月初充当",
           dayOfMonth: 1,
         }

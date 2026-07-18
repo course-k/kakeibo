@@ -11,5 +11,20 @@ const { getDefaultConfig } = require('expo/metro-config');
 const config = getDefaultConfig(__dirname);
 
 config.resolver.sourceExts.push('sql');
+config.resolver.assetExts.push('wasm');
+
+// expo-sqlite の Web worker は SharedArrayBuffer を使うため、開発サーバーを
+// cross-origin isolated にする。ネイティブ bundle には影響しない。
+const defaultEnhanceMiddleware = config.server.enhanceMiddleware;
+config.server.enhanceMiddleware = (middleware, metroServer) => {
+  const enhancedMiddleware = defaultEnhanceMiddleware
+    ? defaultEnhanceMiddleware(middleware, metroServer)
+    : middleware;
+  return (request, response, next) => {
+    response.setHeader('Cross-Origin-Embedder-Policy', 'credentialless');
+    response.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+    return enhancedMiddleware(request, response, next);
+  };
+};
 
 module.exports = config;

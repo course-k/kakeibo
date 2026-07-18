@@ -1,7 +1,7 @@
 import { deriveBalance } from "../../domain/balance";
 import { deriveCardPreparedAmount } from "../../domain/card-statement";
 import { deriveSavings } from "../../domain/savings";
-import type { Account, Card, Transaction, TransactionType } from "../../domain/types";
+import type { Account, Card, Category, Transaction, TransactionType } from "../../domain/types";
 
 export type HomeBudgetAccountItem = {
   id: string;
@@ -23,6 +23,7 @@ export type TransactionHistoryItem = {
   type: TransactionType;
   typeLabel: string;
   accountLabel: string;
+  categoryLabel: string | null;
   amount: number;
   amountDirection: "in" | "out" | "neutral";
   memo: string;
@@ -40,7 +41,8 @@ export function buildHomeViewModel(
   accounts: Account[],
   cards: Card[],
   transactions: Transaction[],
-  today: string
+  today: string,
+  categories: Category[] = [],
 ): HomeViewModel {
   const activeBudgetAccounts = accounts.filter(
     (account) => account.type === "budget" && account.archivedAt === null
@@ -64,17 +66,19 @@ export function buildHomeViewModel(
       };
     }),
     savingsAmount: deriveSavings(activeBudgetAccounts, transactions, today),
-    recentTransactions: buildTransactionHistoryItems(accounts, cards, transactions).slice(0, 5),
+    recentTransactions: buildTransactionHistoryItems(accounts, cards, transactions, categories).slice(0, 5),
   };
 }
 
 export function buildTransactionHistoryItems(
   accounts: Account[],
   cards: Card[],
-  transactions: Transaction[]
+  transactions: Transaction[],
+  categories: Category[] = [],
 ): TransactionHistoryItem[] {
   const accountNames = new Map(accounts.map((account) => [account.id, account.name]));
   const cardNames = new Map(cards.map((card) => [card.id, card.name]));
+  const categoryNames = new Map(categories.map((category) => [category.id, category.name]));
 
   return [...transactions]
     .sort(
@@ -89,6 +93,7 @@ export function buildTransactionHistoryItems(
       type: transaction.type,
       typeLabel: transactionTypeLabel(transaction.type),
       accountLabel: buildAccountLabel(transaction, accountNames, cardNames),
+      categoryLabel: transaction.categoryId ? (categoryNames.get(transaction.categoryId) ?? "不明なカテゴリ") : null,
       amount: transaction.amount,
       amountDirection: amountDirection(transaction),
       memo: transaction.memo,

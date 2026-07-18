@@ -29,6 +29,7 @@ export function expandRecurring(rule: RecurringRule, monthRange: MonthRange): Dr
       fromAccountId: rule.fromAccountId,
       toAccountId: rule.toAccountId,
       cardId: rule.cardId,
+      categoryId: rule.categoryId,
       memo: rule.memo,
       recurringRuleId: rule.id,
     });

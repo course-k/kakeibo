@@ -9,11 +9,13 @@ describe("buildMonthlyBudgetIncomeRule", () => {
         amount: 50000,
       })
     ).toEqual({
+      ruleKind: "budget_allocation",
       type: "income",
       amount: 50000,
       fromAccountId: null,
       toAccountId: "budget-1",
       cardId: null,
+      categoryId: null,
       memo: "月初充当",
       dayOfMonth: 1,
     });

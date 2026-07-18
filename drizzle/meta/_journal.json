@@ -8,6 +8,20 @@
       "when": 1783060251044,
       "tag": "0000_brave_excalibur",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1784331529593,
+      "tag": "0001_fluffy_omega_red",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1784331854843,
+      "tag": "0002_productive_pet_avengers",
+      "breakpoints": true
     }
   ]
 }
