@@ -53,6 +53,7 @@ function assertMonthlyBudgetRuleConsistency(
 
     const monthlyRules = rules.filter(
       (rule) =>
+        rule.ruleKind === "budget_allocation" &&
         rule.type === "income" &&
         rule.fromAccountId === null &&
         rule.toAccountId === account.id &&

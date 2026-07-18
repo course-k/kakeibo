@@ -7,6 +7,7 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { listAccounts } from '@/db/accounts-repository';
 import { listCards } from '@/db/cards-repository';
+import { listCategories } from '@/db/categories-repository';
 import { useDb } from '@/db/provider';
 import { getTransactionById, softDeleteTransaction, updateTransaction } from '@/db/transactions-repository';
 import type { Transaction } from '@/domain/types';
@@ -46,17 +47,18 @@ export default function TransactionDetailScreen() {
           return;
         }
         try {
-          const [transaction, accounts, cards] = await Promise.all([
+          const [transaction, accounts, cards, categories] = await Promise.all([
             getTransactionById(db, transactionId),
             listAccounts(db, { includeArchived: true }),
             listCards(db),
+            listCategories(db, { includeArchived: true }),
           ]);
           if (!active) return;
           if (!transaction) {
             setError('記録が見つかりません');
           } else {
             setTransaction(transaction);
-            setItem(buildTransactionHistoryItems(accounts, cards, [transaction])[0]);
+            setItem(buildTransactionHistoryItems(accounts, cards, [transaction], categories)[0]);
             if (transaction.type === 'card_debit') {
               setDebitEdit(createCardDebitEditState(transaction));
             }
@@ -136,6 +138,7 @@ export default function TransactionDetailScreen() {
               <ThemedView type="backgroundElement" style={styles.summary}>
                 <Row label="日付" value={item.date} />
                 <Row label="予算・カード" value={item.accountLabel} />
+                {item.categoryLabel ? <Row label="カテゴリ" value={item.categoryLabel} /> : null}
                 <Row label="金額" value={`${item.amount.toLocaleString('ja-JP')}円`} />
                 {item.memo ? <Row label="メモ" value={item.memo} /> : null}
               </ThemedView>

@@ -27,6 +27,17 @@ export const cards = sqliteTable("cards", {
   debitDay: integer("debit_day").notNull(),
 });
 
+/** categories（収入・支出の分類）。予算口座とは独立した分析軸。 */
+export const categories = sqliteTable("categories", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  kind: text("kind").notNull(),
+  sortOrder: integer("sort_order").notNull(),
+  archivedAt: text("archived_at"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
 /** transactions（取引）。deleted_at で論理削除する（不変条件 5）。 */
 export const transactions = sqliteTable("transactions", {
   id: text("id").primaryKey(),
@@ -36,6 +47,7 @@ export const transactions = sqliteTable("transactions", {
   fromAccountId: text("from_account_id"),
   toAccountId: text("to_account_id"),
   cardId: text("card_id"),
+  categoryId: text("category_id"),
   memo: text("memo").notNull(),
   recurringRuleId: text("recurring_rule_id"),
   createdAt: text("created_at").notNull(),
@@ -46,11 +58,13 @@ export const transactions = sqliteTable("transactions", {
 /** recurring_rules（定期取引）。取引のテンプレート＋発生日（毎月 N 日）。 */
 export const recurringRules = sqliteTable("recurring_rules", {
   id: text("id").primaryKey(),
+  ruleKind: text("rule_kind").notNull().default("user"),
   type: text("type").notNull(),
   amount: integer("amount").notNull(),
   fromAccountId: text("from_account_id"),
   toAccountId: text("to_account_id"),
   cardId: text("card_id"),
+  categoryId: text("category_id"),
   memo: text("memo").notNull(),
   dayOfMonth: integer("day_of_month").notNull(),
 });

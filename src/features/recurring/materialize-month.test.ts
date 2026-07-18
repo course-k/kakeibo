@@ -232,6 +232,7 @@ describe("materializeRecurringRulesForMonth", () => {
         },
       ],
       cards: [],
+      categories: [],
       transactions: [],
       recurringRules: [
         {

@@ -31,6 +31,18 @@ export type Card = {
   debitDay: number;
 };
 
+export type CategoryKind = "income" | "expense";
+
+export type Category = {
+  id: string;
+  name: string;
+  kind: CategoryKind;
+  sortOrder: number;
+  archivedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type TransactionType =
   | "income"
   | "expense_cash"
@@ -49,6 +61,8 @@ export type Transaction = {
   fromAccountId: string | null;
   toAccountId: string | null;
   cardId: string | null;
+  /** 収入・支出カテゴリ。既存取引と振替等は null を許可する。 */
+  categoryId?: string | null;
   memo: string;
   recurringRuleId: string | null;
   createdAt: string;
@@ -64,11 +78,14 @@ export type Transaction = {
  */
 export type RecurringRule = {
   id: string;
+  /** 月初予算充当は一般の定期記録UIから変更しない。旧入力は user 扱い。 */
+  ruleKind?: "budget_allocation" | "user";
   type: TransactionType;
   amount: number;
   fromAccountId: string | null;
   toAccountId: string | null;
   cardId: string | null;
+  categoryId?: string | null;
   memo: string;
   /** 毎月の発生日（1-31）。31 は「月末」を表す。 */
   dayOfMonth: number;

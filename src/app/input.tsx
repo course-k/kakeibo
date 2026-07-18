@@ -1,5 +1,5 @@
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -13,13 +13,17 @@ import { SafeAreaView } from "react-native-safe-area-context";
 
 import { ThemedText } from "@/components/themed-text";
 import { ThemedView } from "@/components/themed-view";
-import { Colors, Spacing } from "@/constants/theme";
-import type { Account, Card, Transaction } from "@/domain/types";
-import { deriveBalance } from "@/domain/balance";
-import { useDb } from "@/db/provider";
-import { normalizeIsoDate } from "@/db/normalize-date";
+import { Spacing } from "@/constants/theme";
 import { listAccounts } from "@/db/accounts-repository";
 import { listCards } from "@/db/cards-repository";
+import { listCategories } from "@/db/categories-repository";
+import { normalizeIsoDate } from "@/db/normalize-date";
+import { useDb } from "@/db/provider";
+import {
+  getRecurringRuleById,
+  insertRecurringRule,
+  updateRecurringRule,
+} from "@/db/recurring-rules-repository";
 import {
   getTransactionById,
   insertTransaction,
@@ -27,201 +31,193 @@ import {
   softDeleteTransaction,
   updateTransaction,
 } from "@/db/transactions-repository";
+import { deriveBalance } from "@/domain/balance";
+import type { Account, Card, Category, RecurringRule, Transaction } from "@/domain/types";
 import {
-  appendAmountDigit,
-  buildExpenseTransactionInput,
-  buildExpenseTransactionPatch,
-  clearAmount,
-  createEditingInputState,
-  createInitialInputState,
-  deleteAmountDigit,
-  deriveExpenseEditPreview,
-  deriveLastInputDefaults,
-  isEditableExpenseTransaction,
-  selectInputBudgetAccounts,
-  todayIsoDate,
-  type InputFormState,
-  type PaymentSelection,
-} from "@/features/input/input-logic";
+  buildEntryRecurringRuleInput,
+  buildEntryTransactionInput,
+  buildEntryTransactionPatch,
+  changeEntryKind,
+  createEntryState,
+  entryStateFromRecurringRule,
+  entryStateFromTransaction,
+  type EntryFormState,
+  type EntryKind,
+} from "@/features/input/entry-logic";
+import { todayIsoDate } from "@/features/input/input-logic";
 
-const keypad = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "C", "0", "⌫"];
+const kindLabels: Record<EntryKind, string> = {
+  expense: "支出",
+  income: "収入",
+  transfer: "振替",
+};
 
 export default function InputScreen() {
   const db = useDb();
   const router = useRouter();
-  const params = useLocalSearchParams<{ transactionId?: string }>();
-  const editingId = typeof params.transactionId === "string" ? params.transactionId : null;
+  const params = useLocalSearchParams<{
+    transactionId?: string;
+    recurringRuleId?: string;
+    kind?: string;
+    recurring?: string;
+  }>();
+  const transactionId = singleParam(params.transactionId);
+  const recurringRuleId = singleParam(params.recurringRuleId);
+  const requestedRecurring = singleParam(params.recurring) === "1";
+  const requestedKind = isEntryKind(singleParam(params.kind)) ? (singleParam(params.kind) as EntryKind) : "expense";
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [cards, setCards] = useState<Card[]>([]);
-  const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
+  const [categories, setCategories] = useState<Category[]>([]);
   const [balances, setBalances] = useState<Record<string, number>>({});
-  const [state, setState] = useState<InputFormState | null>(null);
+  const [state, setState] = useState<EntryFormState | null>(null);
+  const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
+  const [editingRule, setEditingRule] = useState<RecurringRule | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const budgetAccounts = useMemo(
-    () => selectInputBudgetAccounts(accounts, editingTransaction?.fromAccountId ?? null),
-    [accounts, editingTransaction]
-  );
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [error, setError] = useState("");
+  const saveLock = useRef(false);
 
   const load = useCallback(async () => {
     setLoading(true);
-    setError(null);
-    setState(null);
-    setEditingTransaction(null);
+    setError("");
     try {
-      const [loadedAccounts, loadedCards, loadedTransactions] = await Promise.all([
+      const [loadedAccounts, loadedCards, loadedCategories, transactions] = await Promise.all([
         listAccounts(db, { includeArchived: true }),
         listCards(db),
+        listCategories(db, { includeArchived: true }),
         listTransactions(db),
       ]);
-      const activeBudgets = loadedAccounts.filter(
-        (account) => account.type === "budget" && account.archivedAt === null
-      );
-      const target = editingId ? await getTransactionById(db, editingId) : undefined;
-      if (editingId && !target) {
-        throw new Error("編集する支出が見つかりません");
+      const transaction = transactionId ? await getTransactionById(db, transactionId) : undefined;
+      const rule = recurringRuleId ? await getRecurringRuleById(db, recurringRuleId) : undefined;
+      if (transactionId && !transaction) throw new Error("編集する記録が見つかりません");
+      if (recurringRuleId && !rule) throw new Error("編集する定期記録が見つかりません");
+      if (rule?.ruleKind === "budget_allocation") {
+        throw new Error("月初の予算充当は設定の予算編集から変更してください");
       }
-      if (target && !isEditableExpenseTransaction(target)) {
-        throw new Error("この記録は支出入力画面では編集できません");
-      }
-      const defaults = deriveLastInputDefaults(loadedTransactions, loadedCards);
-      const defaultBudgetAccountId = activeBudgets.some(
-        (account) => account.id === defaults.budgetAccountId
-      )
-        ? defaults.budgetAccountId
-        : activeBudgets[0]?.id ?? null;
-      const nextState = target
-        ? createEditingInputState(target, loadedCards, loadedAccounts)
-        : createInitialInputState(
-            {
-              budgetAccountId: defaultBudgetAccountId,
-              payment: normalizePayment(defaults.payment, loadedCards),
-            },
-            todayIsoDate()
-          );
-
+      let next = transaction
+        ? entryStateFromTransaction(transaction)
+        : rule
+          ? entryStateFromRecurringRule(rule, todayIsoDate())
+          : createEntryState(requestedKind, todayIsoDate());
+      if (!transaction && !rule && requestedRecurring) next = { ...next, recurring: true };
+      next = applyDefaults(next, loadedAccounts, loadedCategories);
       setAccounts(loadedAccounts);
       setCards(loadedCards);
-      setEditingTransaction(target ?? null);
+      setCategories(loadedCategories);
+      setEditingTransaction(transaction ?? null);
+      setEditingRule(rule ?? null);
+      setDetailsOpen(Boolean(transaction || rule || requestedRecurring));
       setBalances(
         Object.fromEntries(
           loadedAccounts.map((account) => [
             account.id,
-            deriveBalance(account.id, loadedTransactions, todayIsoDate()),
-          ])
-        )
+            deriveBalance(account.id, transactions, todayIsoDate()),
+          ]),
+        ),
       );
-      setState(nextState);
+      setState(next);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "入力画面の読み込みに失敗しました");
+      setState(null);
+      setError(cause instanceof Error ? cause.message : "入力画面を開けませんでした");
     } finally {
       setLoading(false);
     }
-  }, [db, editingId]);
+  }, [db, recurringRuleId, requestedKind, requestedRecurring, transactionId]);
 
   useFocusEffect(
     useCallback(() => {
       void load();
-    }, [load])
+    }, [load]),
   );
 
-  const updateState = (patch: Partial<InputFormState>) => {
+  const activeBudgets = useMemo(
+    () =>
+      accounts.filter(
+        (account) =>
+          account.type === "budget" &&
+          (account.archivedAt === null ||
+            account.id === state?.fromAccountId ||
+            account.id === state?.toAccountId),
+      ),
+    [accounts, state?.fromAccountId, state?.toAccountId],
+  );
+  const visibleCategories = useMemo(
+    () =>
+      categories.filter(
+        (category) =>
+          category.kind === (state?.kind === "income" ? "income" : "expense") &&
+          (category.archivedAt === null || category.id === state?.categoryId),
+      ),
+    [categories, state?.categoryId, state?.kind],
+  );
+
+  function update(patch: Partial<EntryFormState>) {
     setState((current) => (current ? { ...current, ...patch } : current));
-  };
+  }
 
-  const handleKey = (key: string) => {
-    setState((current) => {
-      if (!current) return current;
-      if (key === "C") return { ...current, amountText: clearAmount() };
-      if (key === "⌫") return { ...current, amountText: deleteAmountDigit(current.amountText) };
-      return { ...current, amountText: appendAmountDigit(current.amountText, key) };
-    });
-  };
+  function selectKind(kind: EntryKind) {
+    if (editingTransaction || editingRule) return;
+    setState((current) =>
+      current ? applyDefaults(changeEntryKind(current, kind), accounts, categories) : current,
+    );
+  }
 
-  const handleSave = async () => {
-    if (!state || saving) return;
+  async function save() {
+    if (!state || saving || saveLock.current) return;
+    saveLock.current = true;
     setSaving(true);
-    setError(null);
+    setError("");
     try {
-      const normalizedDate = normalizeIsoDate(state.date);
-      if (normalizedDate > todayIsoDate()) {
-        throw new Error("未来の日付は記録できません");
-      }
-      const normalizedState = { ...state, date: normalizedDate };
-      if (editingId) {
-        if (!editingTransaction) {
-          throw new Error("編集する支出が見つかりません");
-        }
+      const date = isRule ? state.date : normalizeIsoDate(state.date);
+      if (!isRule && date > todayIsoDate()) throw new Error("未来の日付は記録できません");
+      const normalized = { ...state, date };
+      if (editingRule) {
+        await updateRecurringRule(db, editingRule.id, buildEntryRecurringRuleInput(normalized, cards));
+      } else if (!editingTransaction && normalized.recurring) {
+        await insertRecurringRule(db, buildEntryRecurringRuleInput(normalized, cards));
+      } else if (editingTransaction) {
         await updateTransaction(
           db,
-          editingId,
-          buildExpenseTransactionPatch(normalizedState, cards, editingTransaction)
+          editingTransaction.id,
+          buildEntryTransactionPatch(normalized, cards, editingTransaction),
         );
       } else {
-        await insertTransaction(db, buildExpenseTransactionInput(normalizedState, cards));
+        await insertTransaction(db, buildEntryTransactionInput(normalized, cards));
       }
       router.back();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "保存に失敗しました");
-    } finally {
+      setError(cause instanceof Error ? cause.message : "保存できませんでした");
+      saveLock.current = false;
       setSaving(false);
     }
-  };
+  }
 
-  const handleDelete = async () => {
-    if (!editingId || saving) return;
-    Alert.alert("削除しますか", "この取引を削除します。", [
+  function confirmDelete() {
+    if (!editingTransaction || saving) return;
+    Alert.alert("この記録を削除しますか", "残高と集計から取り除かれます。", [
       { text: "キャンセル", style: "cancel" },
       {
         text: "削除",
         style: "destructive",
         onPress: () => {
           void (async () => {
-            setSaving(true);
-            setError(null);
             try {
-              await softDeleteTransaction(db, editingId);
+              await softDeleteTransaction(db, editingTransaction.id);
               router.back();
             } catch (cause) {
-              setError(cause instanceof Error ? cause.message : "削除に失敗しました");
-            } finally {
-              setSaving(false);
+              setError(cause instanceof Error ? cause.message : "削除できませんでした");
             }
           })();
         },
       },
     ]);
-  };
-
-  const selectedBudget = budgetAccounts.find((account) => account.id === state?.budgetAccountId);
-  const amount = state ? Number(state.amountText || 0) : 0;
-  const previewChanges = useMemo(() => {
-    if (!state || !selectedBudget || amount <= 0) return [];
-    try {
-      const next = buildExpenseTransactionInput(state, cards);
-      return deriveExpenseEditPreview(balances, next, editingTransaction, todayIsoDate());
-    } catch {
-      return [];
-    }
-  }, [amount, balances, cards, editingTransaction, selectedBudget, state]);
-  const nextBudgetChange = previewChanges.find(
-    (change) => change.kind === "budget" && change.isNext
-  );
-  const archivedEditingBudget = editingTransaction
-    ? accounts.find(
-        (account) =>
-          account.id === editingTransaction.fromAccountId &&
-          account.type === "budget" &&
-          account.archivedAt !== null
-      )
-    : undefined;
+  }
 
   if (loading) {
     return (
       <ThemedView style={styles.screen}>
-        <SafeAreaView style={styles.center}>
+        <SafeAreaView style={styles.center} edges={["bottom"]}>
           <ActivityIndicator />
         </SafeAreaView>
       </ThemedView>
@@ -231,142 +227,265 @@ export default function InputScreen() {
   if (!state) {
     return (
       <ThemedView style={styles.screen}>
-        <SafeAreaView style={styles.center}>
-          <View style={styles.loadError}>
-            <ThemedText type="subtitle">入力画面を開けません</ThemedText>
-            <ThemedText themeColor="textSecondary">{error ?? 'データを読み込めませんでした'}</ThemedText>
-            <Pressable style={styles.saveButton} onPress={() => void load()}>
-              <ThemedText style={styles.saveButtonText}>もう一度試す</ThemedText>
-            </Pressable>
-          </View>
+        <SafeAreaView style={styles.center} edges={["bottom"]}>
+          <ThemedText type="subtitle">入力画面を開けません</ThemedText>
+          <ThemedText>{error}</ThemedText>
+          <Pressable style={styles.primaryButton} onPress={() => void load()}>
+            <ThemedText style={styles.primaryText}>もう一度試す</ThemedText>
+          </Pressable>
         </SafeAreaView>
       </ThemedView>
     );
   }
 
+  const isRule = Boolean(editingRule) || state.recurring;
+  const hasArchivedSelection =
+    activeBudgets.some(
+      (account) =>
+        (account.id === state.fromAccountId || account.id === state.toAccountId) &&
+        account.archivedAt !== null,
+    ) || visibleCategories.some((category) => category.id === state.categoryId && category.archivedAt !== null);
+  const normalizedAmount = state.amountText.replace(/,/g, "").trim();
+  const amount = Number(normalizedAmount);
+  const validAmount = /^\d+$/.test(normalizedAmount) && Number.isSafeInteger(amount) && amount > 0;
+  const hasRequiredSelection =
+    state.kind === "income"
+      ? Boolean(state.toAccountId && state.categoryId)
+      : state.kind === "transfer"
+        ? Boolean(state.fromAccountId && state.toAccountId && state.fromAccountId !== state.toAccountId)
+        : Boolean(state.fromAccountId && state.categoryId);
+  const canSave =
+    !saving &&
+    !hasArchivedSelection &&
+    activeBudgets.length > 0 &&
+    validAmount &&
+    hasRequiredSelection;
+
   return (
     <ThemedView style={styles.screen}>
-      <SafeAreaView style={styles.safe}>
-        <ScrollView contentContainerStyle={styles.content}>
-          <View style={styles.header}>
-            <ThemedText type="subtitle">{editingId ? "支出を編集" : "支出を入力"}</ThemedText>
-            <TextInput
-              value={state.date}
-              onChangeText={(date) => updateState({ date })}
-              style={styles.dateInput}
-              inputMode="text"
-              autoCapitalize="none"
-              autoCorrect={false}
-              placeholder="YYYY-MM-DD"
-            />
-          </View>
-
-          <View style={styles.amountBox}>
-            <ThemedText type="small" themeColor="textSecondary">
-              金額
-            </ThemedText>
-            <ThemedText type="title">{state.amountText || "0"} 円</ThemedText>
-          </View>
-
-          <View style={styles.keypad}>
-            {keypad.map((key) => (
-              <Pressable key={key} style={styles.key} onPress={() => handleKey(key)}>
-                <ThemedText type="subtitle">{key}</ThemedText>
-              </Pressable>
-            ))}
-          </View>
-
-          <SectionTitle title="どの予算から使う？" />
-          {budgetAccounts.length === 0 ? (
-            <View style={styles.emptyState}>
-              <ThemedText>先に予算を1つ作成してください</ThemedText>
-              <Pressable style={styles.secondaryButton} onPress={() => router.replace('/(tabs)/settings')}>
-                <ThemedText type="smallBold">設定を開く</ThemedText>
-              </Pressable>
-            </View>
-          ) : (
-          <View style={styles.choices}>
-            {budgetAccounts.map((account) => (
-              <ChoiceButton
-                key={account.id}
-                label={`${account.name}${account.archivedAt ? "（終了済み）" : ""}  ${formatYen(balances[account.id] ?? 0)}`}
-                selected={state.budgetAccountId === account.id}
-                onPress={() => updateState({ budgetAccountId: account.id })}
-              />
-            ))}
-          </View>
-          )}
-
-          <SectionTitle title="支払手段" />
-          <View style={styles.choices}>
-            <ChoiceButton
-              label="現金・即時払い"
-              selected={state.payment.kind === "cash"}
-              onPress={() => updateState({ payment: { kind: "cash" } })}
-            />
-            {cards.map((card) => (
-              <ChoiceButton
-                key={card.id}
-                label={card.name}
-                selected={state.payment.kind === "card" && state.payment.cardId === card.id}
-                onPress={() => updateState({ payment: { kind: "card", cardId: card.id } })}
-              />
-            ))}
-          </View>
-
-          {previewChanges.length > 0 ? (
-            <View style={[styles.preview, nextBudgetChange && nextBudgetChange.after < 0 && styles.previewWarning]}>
-              <ThemedText type="smallBold">保存すると</ThemedText>
-              {previewChanges.map((change) => (
-                <ThemedText key={change.accountId}>
-                  {previewChangeLabel(change, accounts, cards, Boolean(editingTransaction))}{" "}
-                  {formatYen(change.before)} → {formatYen(change.after)}
-                </ThemedText>
-              ))}
-              {nextBudgetChange && nextBudgetChange.after < 0 ? (
-                <ThemedText style={styles.warningText}>予算を超えます。保存後に別の予算から移してください。</ThemedText>
-              ) : null}
-            </View>
-          ) : null}
-
-          <TextInput
-            value={state.memo}
-            onChangeText={(memo) => updateState({ memo })}
-            style={styles.dateInput}
-            placeholder="店名・メモ（任意）"
-            returnKeyType="done"
-          />
-
-          {archivedEditingBudget ? (
-            <View style={styles.previewWarning}>
-              <ThemedText type="smallBold">「{archivedEditingBudget.name}」は終了済みです</ThemedText>
-              <ThemedText type="small">
-                過去の残高を隠さないため、金額の変更や削除の前に予算を再開してください。
-              </ThemedText>
+      <SafeAreaView style={styles.safe} edges={["bottom"]}>
+        <ScrollView style={styles.formScroll} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+          <View accessibilityRole="tablist" style={styles.segmented}>
+            {(Object.keys(kindLabels) as EntryKind[]).map((kind) => (
               <Pressable
-                style={styles.secondaryButton}
-                onPress={() => router.push('/(tabs)/settings')}>
-                <ThemedText type="smallBold">設定で予算を再開</ThemedText>
+                accessibilityRole="tab"
+                accessibilityState={{ selected: state.kind === kind, disabled: Boolean(editingTransaction || editingRule) }}
+                disabled={Boolean(editingTransaction || editingRule)}
+                key={kind}
+                onPress={() => selectKind(kind)}
+                style={[styles.segment, state.kind === kind && styles.segmentSelected]}>
+                <ThemedText type="smallBold">{kindLabels[kind]}</ThemedText>
               </Pressable>
+            ))}
+          </View>
+
+          <View style={styles.amountCard}>
+            <ThemedText type="smallBold" themeColor="textSecondary">金額</ThemedText>
+            <View style={styles.amountRow}>
+              <TextInput
+                accessibilityLabel="金額"
+                autoFocus={!editingTransaction && !editingRule}
+                inputMode="numeric"
+                keyboardType="number-pad"
+                onChangeText={(amountText) => update({ amountText })}
+                placeholder="0"
+                style={styles.amountInput}
+                value={state.amountText}
+              />
+              <ThemedText style={styles.yenLabel}>円</ThemedText>
+            </View>
+          </View>
+
+          {state.kind === "expense" ? (
+            <ChoiceGroup
+              accounts={activeBudgets}
+              balances={balances}
+              label="どの予算から使う？"
+              onSelect={(fromAccountId) => update({ fromAccountId })}
+              selectedId={state.fromAccountId}
+            />
+          ) : null}
+          {state.kind === "income" ? (
+            <ChoiceGroup
+              accounts={activeBudgets}
+              balances={balances}
+              label="どの予算に入れる？"
+              onSelect={(toAccountId) => update({ toAccountId })}
+              selectedId={state.toAccountId}
+            />
+          ) : null}
+          {state.kind === "transfer" ? (
+            <>
+              <ChoiceGroup
+                accounts={activeBudgets}
+                balances={balances}
+                label="移動元"
+                onSelect={(fromAccountId) =>
+                  update({
+                    fromAccountId,
+                    toAccountId: state.toAccountId === fromAccountId ? null : state.toAccountId,
+                  })
+                }
+                selectedId={state.fromAccountId}
+              />
+              <ChoiceGroup
+                accounts={activeBudgets.filter((account) => account.id !== state.fromAccountId)}
+                balances={balances}
+                label="移動先"
+                onSelect={(toAccountId) => update({ toAccountId })}
+                selectedId={state.toAccountId}
+              />
+            </>
+          ) : null}
+
+          {state.kind !== "transfer" ? (
+            <View style={styles.sectionCard}>
+              <View style={styles.sectionHeader}>
+                <FieldLabel>{state.kind === "income" ? "収入カテゴリ" : "支出カテゴリ"}</FieldLabel>
+                <Pressable onPress={() => router.push("/(tabs)/settings")}>
+                  <ThemedText type="smallBold">カテゴリ設定 ›</ThemedText>
+                </Pressable>
+              </View>
+              <View style={styles.chips}>
+                {visibleCategories.map((category) => (
+                  <ChoiceChip
+                    key={category.id}
+                    label={`${category.name}${category.archivedAt ? "（無効）" : ""}`}
+                    onPress={() => update({ categoryId: category.id })}
+                    selected={state.categoryId === category.id}
+                  />
+                ))}
+              </View>
             </View>
           ) : null}
 
-          {error ? <ThemedText themeColor="textSecondary">{error}</ThemedText> : null}
+          {state.kind === "expense" ? (
+            <View style={styles.sectionCard}>
+              <FieldLabel>支払方法</FieldLabel>
+              <View style={styles.chips}>
+                <ChoiceChip
+                  label="現金・即時払い"
+                  onPress={() => update({ payment: { kind: "cash" } })}
+                  selected={state.payment.kind === "cash"}
+                />
+                {cards.map((card) => (
+                  <ChoiceChip
+                    key={card.id}
+                    label={card.name}
+                    onPress={() => update({ payment: { kind: "card", cardId: card.id } })}
+                    selected={state.payment.kind === "card" && state.payment.cardId === card.id}
+                  />
+                ))}
+              </View>
+            </View>
+          ) : null}
 
+          <Pressable
+            accessibilityRole="button"
+            accessibilityState={{ expanded: detailsOpen }}
+            onPress={() => setDetailsOpen((open) => !open)}
+            style={styles.detailsDisclosure}>
+            <View style={styles.detailsSummary}>
+              <ThemedText type="smallBold">日付・メモ・繰り返し</ThemedText>
+              <ThemedText type="small" themeColor="textSecondary">
+                {isRule ? `毎月${state.dayOfMonth}日` : state.date}{state.memo ? " ・ メモあり" : ""}
+              </ThemedText>
+            </View>
+            <ThemedText style={styles.disclosureIcon}>{detailsOpen ? "−" : "＋"}</ThemedText>
+          </Pressable>
+
+          {detailsOpen ? (
+            <View style={styles.detailsCard}>
+              {!isRule ? (
+                <View style={styles.detailField}>
+                  <FieldLabel>日付</FieldLabel>
+                  <TextInput
+                    accessibilityLabel="記録日"
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    inputMode="text"
+                    onChangeText={(date) => update({ date })}
+                    placeholder="YYYY-MM-DD"
+                    style={styles.input}
+                    value={state.date}
+                  />
+                </View>
+              ) : null}
+              {!editingTransaction ? (
+                <View style={styles.repeatPanel}>
+                  {!editingRule && !requestedRecurring ? (
+                    <Pressable
+                      accessibilityRole="switch"
+                      accessibilityState={{ checked: state.recurring }}
+                      onPress={() => update({ recurring: !state.recurring })}
+                      style={styles.repeatToggle}>
+                      <View>
+                        <ThemedText type="smallBold">毎月繰り返す</ThemedText>
+                        <ThemedText type="small" themeColor="textSecondary">将来の月も自動で記録</ThemedText>
+                      </View>
+                      <View style={[styles.togglePill, state.recurring && styles.togglePillOn]}>
+                        <ThemedText type="smallBold" style={state.recurring ? styles.toggleTextOn : undefined}>
+                          {state.recurring ? "ON" : "OFF"}
+                        </ThemedText>
+                      </View>
+                    </Pressable>
+                  ) : null}
+                  {isRule ? (
+                    <View style={styles.dayRow}>
+                      <ThemedText>毎月</ThemedText>
+                      <TextInput
+                        accessibilityLabel="毎月の日付"
+                        inputMode="numeric"
+                        keyboardType="number-pad"
+                        onChangeText={(dayOfMonth) => update({ dayOfMonth })}
+                        style={styles.dayInput}
+                        value={state.dayOfMonth}
+                      />
+                      <ThemedText>日（31は月末）</ThemedText>
+                    </View>
+                  ) : null}
+                </View>
+              ) : null}
+              <View style={styles.detailField}>
+                <FieldLabel>メモ</FieldLabel>
+                <TextInput
+                  accessibilityLabel="メモ"
+                  onChangeText={(memo) => update({ memo })}
+                  placeholder="内容・店名など（任意）"
+                  returnKeyType="done"
+                  style={styles.input}
+                  value={state.memo}
+                />
+              </View>
+            </View>
+          ) : null}
+
+          {hasArchivedSelection ? (
+            <ThemedView type="backgroundElement" style={styles.warningPanel}>
+              <ThemedText type="smallBold">無効な予算またはカテゴリが選択されています</ThemedText>
+              <ThemedText type="small">設定で再開してから保存してください。</ThemedText>
+            </ThemedView>
+          ) : null}
+          {error ? (
+            <ThemedText accessibilityLiveRegion="polite" style={styles.warning}>
+              {error}
+            </ThemedText>
+          ) : null}
         </ScrollView>
+
         <View style={styles.footer}>
           <Pressable
-            style={styles.saveButton}
-            onPress={handleSave}
-            disabled={saving || budgetAccounts.length === 0 || Boolean(archivedEditingBudget)}>
-            <ThemedText style={styles.saveButtonText}>{saving ? "保存中" : "保存"}</ThemedText>
+            accessibilityRole="button"
+            disabled={!canSave}
+            onPress={() => void save()}
+            style={[styles.primaryButton, !canSave && styles.disabled]}>
+            <ThemedText style={styles.primaryText}>
+              {saving ? "保存中…" : isRule ? "定期記録を保存" : `${kindLabels[state.kind]}を記録`}
+            </ThemedText>
           </Pressable>
-          {editingId ? (
-            <Pressable
-              style={styles.deleteButton}
-              onPress={handleDelete}
-              disabled={saving || Boolean(archivedEditingBudget)}>
-              <ThemedText style={styles.deleteButtonText}>削除</ThemedText>
+          {editingTransaction ? (
+            <Pressable style={styles.deleteButton} onPress={confirmDelete} disabled={saving}>
+              <ThemedText style={styles.deleteText}>削除</ThemedText>
             </Pressable>
           ) : null}
         </View>
@@ -375,39 +494,76 @@ export default function InputScreen() {
   );
 }
 
-function normalizePayment(payment: PaymentSelection, cards: Card[]): PaymentSelection {
-  if (payment.kind === "card" && cards.some((card) => card.id === payment.cardId)) {
-    return payment;
-  }
-  return { kind: "cash" };
-}
-
-function SectionTitle({ title }: { title: string }) {
-  return <ThemedText type="smallBold">{title}</ThemedText>;
-}
-
-function formatYen(amount: number): string {
-  const sign = amount < 0 ? '-' : '';
-  return `${sign}¥${Math.abs(amount).toLocaleString('ja-JP')}`;
-}
-
-function previewChangeLabel(
-  change: ReturnType<typeof deriveExpenseEditPreview>[number],
+function applyDefaults(
+  state: EntryFormState,
   accounts: Account[],
-  cards: Card[],
-  editing: boolean
-): string {
-  const account = accounts.find((item) => item.id === change.accountId);
-  const card = cards.find((item) => item.settlementAccountId === change.accountId);
-  const name =
-    change.kind === "card_settlement"
-      ? `${card?.name ?? account?.name ?? "カード"} の支払準備`
-      : account?.name ?? "予算";
-  if (!editing || change.wasOriginal === change.isNext) return name;
-  return `${change.wasOriginal ? "変更前" : "変更後"}: ${name}`;
+  categories: Category[],
+): EntryFormState {
+  const budgets = accounts.filter((account) => account.type === "budget" && account.archivedAt === null);
+  const categoryKind = state.kind === "income" ? "income" : "expense";
+  const matchingCategories = categories.filter(
+    (category) => category.kind === categoryKind && category.archivedAt === null,
+  );
+  if (state.kind === "income") {
+    return {
+      ...state,
+      toAccountId: state.toAccountId ?? budgets[0]?.id ?? null,
+      categoryId: state.categoryId ?? matchingCategories[0]?.id ?? null,
+    };
+  }
+  if (state.kind === "transfer") {
+    const fromAccountId = state.fromAccountId ?? budgets[0]?.id ?? null;
+    return {
+      ...state,
+      fromAccountId,
+      toAccountId:
+        state.toAccountId && state.toAccountId !== fromAccountId
+          ? state.toAccountId
+          : budgets.find((account) => account.id !== fromAccountId)?.id ?? null,
+      categoryId: null,
+    };
+  }
+  return {
+    ...state,
+    fromAccountId: state.fromAccountId ?? budgets[0]?.id ?? null,
+    categoryId: state.categoryId ?? matchingCategories[0]?.id ?? null,
+  };
 }
 
-function ChoiceButton({
+function ChoiceGroup({
+  label,
+  accounts,
+  balances,
+  selectedId,
+  onSelect,
+}: {
+  label: string;
+  accounts: Account[];
+  balances: Record<string, number>;
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <View accessibilityRole="radiogroup" style={styles.sectionCard}>
+      <FieldLabel>{label}</FieldLabel>
+      <View style={styles.choices}>
+        {accounts.map((account) => (
+          <Pressable
+            accessibilityRole="radio"
+            accessibilityState={{ checked: account.id === selectedId }}
+            key={account.id}
+            onPress={() => onSelect(account.id)}
+            style={[styles.accountChoice, account.id === selectedId && styles.choiceSelected]}>
+            <ThemedText type="smallBold">{account.name}{account.archivedAt ? "（終了済み）" : ""}</ThemedText>
+            <ThemedText type="small" themeColor="textSecondary">{yen(balances[account.id] ?? 0)}</ThemedText>
+          </Pressable>
+        ))}
+      </View>
+    </View>
+  );
+}
+
+function ChoiceChip({
   label,
   selected,
   onPress,
@@ -420,126 +576,70 @@ function ChoiceButton({
     <Pressable
       accessibilityRole="radio"
       accessibilityState={{ checked: selected }}
-      style={[styles.choice, selected && styles.choiceSelected]}
-      onPress={onPress}>
+      onPress={onPress}
+      style={[styles.chip, selected && styles.choiceSelected]}>
       <ThemedText type="smallBold">{label}</ThemedText>
     </Pressable>
   );
 }
 
+function FieldLabel({ children }: { children: string }) {
+  return <ThemedText type="smallBold">{children}</ThemedText>;
+}
+
+function singleParam(value: string | string[] | undefined): string | undefined {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function isEntryKind(value: string | undefined): value is EntryKind {
+  return value === "expense" || value === "income" || value === "transfer";
+}
+
+function yen(value: number): string {
+  const sign = value < 0 ? "-" : "";
+  return `${sign}¥${Math.abs(value).toLocaleString("ja-JP")}`;
+}
+
 const styles = StyleSheet.create({
-  screen: {
-    flex: 1,
-  },
-  safe: {
-    flex: 1,
-  },
-  center: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  loadError: {
-    gap: Spacing.three,
-    maxWidth: 360,
-    padding: Spacing.three,
-    width: '100%',
-  },
-  content: {
-    gap: Spacing.three,
-    padding: Spacing.three,
-    paddingBottom: Spacing.four,
-  },
-  footer: {
-    backgroundColor: Colors.light.background,
-    borderTopColor: Colors.light.backgroundSelected,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    gap: Spacing.two,
-    padding: Spacing.three,
-  },
-  header: {
-    gap: Spacing.two,
-  },
-  dateInput: {
-    borderRadius: 8,
-    backgroundColor: Colors.light.backgroundElement,
-    fontSize: 16,
-    padding: Spacing.three,
-  },
-  amountBox: {
-    gap: Spacing.one,
-  },
-  keypad: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: Spacing.two,
-  },
-  key: {
-    width: "31.5%",
-    aspectRatio: 1.8,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: 8,
-    backgroundColor: Colors.light.backgroundElement,
-  },
-  choices: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: Spacing.two,
-  },
-  emptyState: {
-    gap: Spacing.two,
-    padding: Spacing.three,
-    borderRadius: 8,
-    backgroundColor: Colors.light.backgroundElement,
-  },
-  secondaryButton: {
-    alignItems: "center",
-    borderRadius: 8,
-    backgroundColor: Colors.light.backgroundSelected,
-    padding: Spacing.three,
-  },
-  preview: {
-    gap: Spacing.one,
-    padding: Spacing.three,
-    borderRadius: 8,
-    backgroundColor: "#eff6ff",
-  },
-  previewWarning: {
-    backgroundColor: "#fff7ed",
-    borderRadius: 8,
-    gap: Spacing.two,
-    padding: Spacing.three,
-  },
-  warningText: {
-    color: "#c2410c",
-  },
-  choice: {
-    borderRadius: 8,
-    backgroundColor: Colors.light.backgroundElement,
-    paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.two,
-  },
-  choiceSelected: {
-    backgroundColor: Colors.light.backgroundSelected,
-  },
-  saveButton: {
-    alignItems: "center",
-    borderRadius: 8,
-    backgroundColor: "#111111",
-    padding: Spacing.three,
-  },
-  saveButtonText: {
-    color: "#ffffff",
-  },
-  deleteButton: {
-    alignItems: "center",
-    borderRadius: 8,
-    borderColor: "#B42318",
-    borderWidth: 1,
-    padding: Spacing.three,
-  },
-  deleteButtonText: {
-    color: "#B42318",
-  },
+  screen: { backgroundColor: "#f6f7f9", flex: 1 },
+  safe: { backgroundColor: "#f6f7f9", flex: 1 },
+  center: { alignItems: "center", flex: 1, gap: Spacing.three, justifyContent: "center", padding: Spacing.four },
+  formScroll: { flex: 1 },
+  content: { gap: 12, padding: Spacing.three, paddingBottom: Spacing.four },
+  segmented: { backgroundColor: "#e8ebef", borderRadius: 12, flexDirection: "row", padding: 4 },
+  segment: { alignItems: "center", borderRadius: 9, flex: 1, minHeight: 44, justifyContent: "center" },
+  segmentSelected: { backgroundColor: "#ffffff", borderColor: "#d7dce2", borderWidth: 1 },
+  amountCard: { backgroundColor: "#ffffff", borderColor: "#e1e5ea", borderRadius: 16, borderWidth: 1, gap: 2, paddingHorizontal: 16, paddingTop: 12 },
+  amountRow: { alignItems: "center", flexDirection: "row", gap: Spacing.two },
+  amountInput: { backgroundColor: "#ffffff", flex: 1, fontSize: 38, fontWeight: "700", minHeight: 62, minWidth: 0, paddingHorizontal: 0, textAlign: "right" },
+  yenLabel: { fontSize: 20, fontWeight: "700" },
+  input: { backgroundColor: "#ffffff", borderColor: "#d1d5db", borderRadius: 10, borderWidth: 1, fontSize: 16, minHeight: 48, paddingHorizontal: 14 },
+  section: { gap: Spacing.two },
+  sectionCard: { backgroundColor: "#ffffff", borderColor: "#e1e5ea", borderRadius: 14, borderWidth: 1, gap: Spacing.two, padding: 14 },
+  sectionHeader: { alignItems: "center", flexDirection: "row", justifyContent: "space-between" },
+  choices: { gap: 6 },
+  accountChoice: { alignItems: "center", backgroundColor: "#f5f6f8", borderColor: "transparent", borderRadius: 10, borderWidth: 1, flexDirection: "row", justifyContent: "space-between", minHeight: 48, paddingHorizontal: 14 },
+  chips: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  chip: { backgroundColor: "#f0f2f5", borderColor: "transparent", borderRadius: 999, borderWidth: 1, minHeight: 42, justifyContent: "center", paddingHorizontal: 16 },
+  choiceSelected: { backgroundColor: "#dbeafe", borderColor: "#2563eb" },
+  detailsDisclosure: { alignItems: "center", backgroundColor: "#ffffff", borderColor: "#e1e5ea", borderRadius: 14, borderWidth: 1, flexDirection: "row", justifyContent: "space-between", minHeight: 64, paddingHorizontal: 14, paddingVertical: 10 },
+  detailsSummary: { flex: 1, gap: 2 },
+  disclosureIcon: { color: "#4b5563", fontSize: 24 },
+  detailsCard: { backgroundColor: "#ffffff", borderColor: "#e1e5ea", borderRadius: 14, borderWidth: 1, gap: 14, padding: 14 },
+  detailField: { gap: 6 },
+  repeatPanel: { gap: Spacing.two },
+  repeatToggle: { alignItems: "center", flexDirection: "row", justifyContent: "space-between", minHeight: 48 },
+  togglePill: { alignItems: "center", backgroundColor: "#e5e7eb", borderRadius: 999, justifyContent: "center", minHeight: 36, minWidth: 58, paddingHorizontal: 12 },
+  togglePillOn: { backgroundColor: "#2563eb" },
+  toggleTextOn: { color: "#ffffff" },
+  dayRow: { alignItems: "center", flexDirection: "row", gap: 8 },
+  dayInput: { backgroundColor: "#f0f2f5", borderRadius: 8, fontSize: 18, minHeight: 44, textAlign: "center", width: 64 },
+  warningPanel: { borderRadius: 10, gap: 6, padding: 12 },
+  warning: { color: "#b42318" },
+  footer: { backgroundColor: "#ffffff", borderTopColor: "#e1e5ea", borderTopWidth: 1, flexDirection: "row", flexShrink: 0, gap: 10, padding: 12 },
+  primaryButton: { alignItems: "center", backgroundColor: "#2563eb", borderRadius: 12, flex: 1, minHeight: 52, justifyContent: "center", paddingHorizontal: 18 },
+  primaryText: { color: "#ffffff", fontWeight: "700" },
+  deleteButton: { alignItems: "center", borderColor: "#b42318", borderRadius: 10, borderWidth: 1, justifyContent: "center", minHeight: 50, paddingHorizontal: 18 },
+  deleteText: { color: "#b42318", fontWeight: "700" },
+  disabled: { opacity: 0.45 },
 });

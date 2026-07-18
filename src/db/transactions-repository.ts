@@ -5,9 +5,10 @@
 import { and, asc, eq, isNull } from "drizzle-orm";
 import { deriveBalance } from "../domain/balance";
 import { validateTransaction } from "../domain/validate-transaction";
-import type { Account, Transaction } from "../domain/types";
+import type { Account, Category, CategoryKind, Transaction } from "../domain/types";
 import { listAccounts } from "./accounts-repository";
 import { listCards } from "./cards-repository";
+import { listCategories } from "./categories-repository";
 import type { AppDatabase } from "./client";
 import { generateId } from "./id";
 import { normalizeIsoDate } from "./normalize-date";
@@ -24,6 +25,7 @@ function toDomain(row: TransactionRow): Transaction {
     fromAccountId: row.fromAccountId,
     toAccountId: row.toAccountId,
     cardId: row.cardId,
+    categoryId: row.categoryId,
     memo: row.memo,
     recurringRuleId: row.recurringRuleId,
     createdAt: row.createdAt,
@@ -33,26 +35,46 @@ function toDomain(row: TransactionRow): Transaction {
 }
 
 function assertValidAgainst(
-  tx: Pick<Transaction, "amount" | "type" | "fromAccountId" | "toAccountId" | "cardId">,
+  tx: Pick<Transaction, "amount" | "type" | "fromAccountId" | "toAccountId" | "cardId" | "categoryId">,
   accounts: Account[],
-  cards: Awaited<ReturnType<typeof listCards>>
+  cards: Awaited<ReturnType<typeof listCards>>,
+  categories: Category[],
 ): void {
   const result = validateTransaction(tx, accounts, cards);
   if (!result.ok) {
     throw new Error(`invalid transaction: ${result.reason}`);
+  }
+  const expectedKind: CategoryKind | null =
+    tx.type === "income"
+      ? "income"
+      : tx.type === "expense_cash" || tx.type === "expense_card"
+        ? "expense"
+        : null;
+  if (expectedKind === null && tx.categoryId != null) {
+    throw new Error("この取引種別にはカテゴリを設定できません");
+  }
+  if (tx.categoryId != null) {
+    const category = categories.find((item) => item.id === tx.categoryId);
+    if (!category || category.kind !== expectedKind) {
+      throw new Error("取引種別に合うカテゴリを選択してください");
+    }
+    if (category.archivedAt !== null) {
+      throw new Error("無効化されたカテゴリは選択できません");
+    }
   }
 }
 
 /** 保存対象の取引を検証する。accounts/cards は DB から都度読み直す（残高キャッシュを持たないのと同じ考え方）。 */
 async function assertValid(
   db: AppDatabase,
-  tx: Pick<Transaction, "amount" | "type" | "fromAccountId" | "toAccountId" | "cardId">
+  tx: Pick<Transaction, "amount" | "type" | "fromAccountId" | "toAccountId" | "cardId" | "categoryId">
 ): Promise<void> {
-  const [accounts, cards] = await Promise.all([
+  const [accounts, cards, categories] = await Promise.all([
     listAccounts(db, { includeArchived: true }),
     listCards(db),
+    listCategories(db, { includeArchived: true }),
   ]);
-  assertValidAgainst(tx, accounts, cards);
+  assertValidAgainst(tx, accounts, cards, categories);
 }
 
 type AccountReferences = Pick<Transaction, "fromAccountId" | "toAccountId">;
@@ -96,6 +118,7 @@ function buildTransactionRow(input: NewTransactionInput, now: string): Transacti
     fromAccountId: input.fromAccountId,
     toAccountId: input.toAccountId,
     cardId: input.cardId,
+    categoryId: input.categoryId ?? null,
     memo: input.memo,
     recurringRuleId: input.recurringRuleId,
     createdAt: now,
@@ -110,11 +133,12 @@ export async function insertTransactionsAtomically(
   inputs: NewTransactionInput[]
 ): Promise<Transaction[]> {
   if (inputs.length === 0) return [];
-  const [accountList, cardList] = await Promise.all([
+  const [accountList, cardList, categoryList] = await Promise.all([
     listAccounts(db, { includeArchived: true }),
     listCards(db),
+    listCategories(db, { includeArchived: true }),
   ]);
-  for (const input of inputs) assertValidAgainst(input, accountList, cardList);
+  for (const input of inputs) assertValidAgainst(input, accountList, cardList, categoryList);
 
   const now = new Date().toISOString();
   const rows = inputs.map((input) => buildTransactionRow(input, now));
@@ -212,12 +236,13 @@ export async function updateTransaction(
   if (existing.deletedAt !== null) {
     throw new Error(`transaction is deleted: ${id}`);
   }
-  const merged: Pick<Transaction, "amount" | "type" | "fromAccountId" | "toAccountId" | "cardId"> = {
+  const merged: Pick<Transaction, "amount" | "type" | "fromAccountId" | "toAccountId" | "cardId" | "categoryId"> = {
     amount: patch.amount ?? existing.amount,
     type: (patch.type ?? existing.type) as Transaction["type"],
     fromAccountId: patch.fromAccountId !== undefined ? patch.fromAccountId : existing.fromAccountId,
     toAccountId: patch.toAccountId !== undefined ? patch.toAccountId : existing.toAccountId,
     cardId: patch.cardId !== undefined ? patch.cardId : existing.cardId,
+    categoryId: patch.categoryId !== undefined ? patch.categoryId : existing.categoryId,
   };
   if (existing.type === "transfer" || merged.type === "transfer") {
     throw new Error("振替は直接変更できません。削除して正しい内容を記録してください");

@@ -7,8 +7,8 @@
 // 起動時マイグレーションは drizzle-orm/expo-sqlite/migrator の useMigrations() で適用する。
 // 適用中はローディング表示、失敗時はエラー表示を出し、成功後のみ children を描画する。
 import { useMigrations } from 'drizzle-orm/expo-sqlite/migrator';
-import { openDatabaseSync } from 'expo-sqlite';
-import { createContext, useContext, type PropsWithChildren } from 'react';
+import { openDatabaseAsync } from 'expo-sqlite';
+import { createContext, useContext, useEffect, useState, type PropsWithChildren } from 'react';
 import { ActivityIndicator, StyleSheet } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
@@ -17,35 +17,59 @@ import { createExpoDatabase, type AppDatabase } from '@/db/client';
 
 import migrations from '../../drizzle/migrations';
 
-const nativeDb = openDatabaseSync('kakeibo.db');
-const db = createExpoDatabase(nativeDb);
-
 const DbContext = createContext<AppDatabase | null>(null);
 
 export function DbProvider({ children }: PropsWithChildren) {
+  const [db, setDb] = useState<AppDatabase | null>(null);
+  const [openError, setOpenError] = useState<Error | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void openDatabaseAsync('kakeibo.db')
+      .then((nativeDb) => {
+        if (active) setDb(createExpoDatabase(nativeDb));
+      })
+      .catch((cause: unknown) => {
+        if (active) setOpenError(cause instanceof Error ? cause : new Error(String(cause)));
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  if (openError) return <DatabaseError error={openError} />;
+  if (!db) return <DatabaseLoading />;
+
+  return <MigratedDbProvider db={db}>{children}</MigratedDbProvider>;
+}
+
+function MigratedDbProvider({ db, children }: PropsWithChildren<{ db: AppDatabase }>) {
   const { success, error } = useMigrations(db, migrations);
 
-  if (error) {
-    return (
-      <ThemedView style={styles.center}>
-        <ThemedText>データベースを更新できませんでした</ThemedText>
-        <ThemedText style={styles.detail}>
-          アプリを終了して再度開いてください。解決しない場合は、データを初期化せずエラー内容を控えてください。
-        </ThemedText>
-        <ThemedText style={styles.detail}>{error.message}</ThemedText>
-      </ThemedView>
-    );
-  }
-
-  if (!success) {
-    return (
-      <ThemedView style={styles.center}>
-        <ActivityIndicator />
-      </ThemedView>
-    );
-  }
+  if (error) return <DatabaseError error={error} />;
+  if (!success) return <DatabaseLoading />;
 
   return <DbContext.Provider value={db}>{children}</DbContext.Provider>;
+}
+
+function DatabaseLoading() {
+  return (
+    <ThemedView style={styles.center}>
+      <ActivityIndicator />
+    </ThemedView>
+  );
+}
+
+function DatabaseError({ error }: { error: Error }) {
+  return (
+    <ThemedView style={styles.center}>
+      <ThemedText>データベースを更新できませんでした</ThemedText>
+      <ThemedText style={styles.detail}>
+        アプリを終了して再度開いてください。解決しない場合は、データを初期化せずエラー内容を控えてください。
+      </ThemedText>
+      <ThemedText style={styles.detail}>{error.message}</ThemedText>
+    </ThemedView>
+  );
 }
 
 /** M3〜M6 の全画面が DB ハンドルを取る唯一の口。シグネチャは後続が依存する契約のため変えない。 */

@@ -7,6 +7,7 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { listAccounts } from '@/db/accounts-repository';
 import { listCards } from '@/db/cards-repository';
+import { listCategories } from '@/db/categories-repository';
 import { useDb } from '@/db/provider';
 import { listTransactions } from '@/db/transactions-repository';
 import {
@@ -25,13 +26,14 @@ export default function HistoryScreen() {
 
       async function loadHistory() {
         try {
-          const [accounts, cards, transactions] = await Promise.all([
+          const [accounts, cards, categories, transactions] = await Promise.all([
             listAccounts(db, { includeArchived: true }),
             listCards(db),
+            listCategories(db, { includeArchived: true }),
             listTransactions(db),
           ]);
           if (!active) return;
-          setItems(buildTransactionHistoryItems(accounts, cards, transactions));
+          setItems(buildTransactionHistoryItems(accounts, cards, transactions, categories));
           setErrorMessage(null);
         } catch (error) {
           if (!active) return;
@@ -77,10 +79,10 @@ export default function HistoryScreen() {
             <ThemedView type="backgroundElement" style={styles.messagePanel}>
               <ThemedText type="smallBold">まだ記録がありません</ThemedText>
               <ThemedText type="small" themeColor="textSecondary">
-                支出を記録すると、ここで確認・編集できます。
+                収入・支出・振替を記録すると、ここで確認できます。
               </ThemedText>
               <Pressable style={styles.inputButton} onPress={() => router.push('/input')}>
-                <ThemedText style={styles.inputButtonText}>支出を記録</ThemedText>
+                <ThemedText style={styles.inputButtonText}>記録する</ThemedText>
               </Pressable>
             </ThemedView>
           ) : null}
@@ -103,7 +105,7 @@ function HistoryRow({ item }: { item: TransactionHistoryItem }) {
           </ThemedText>
         </View>
         <ThemedText type="small" themeColor="textSecondary">
-          {item.accountLabel}
+          {item.accountLabel}{item.categoryLabel ? ` ・ ${item.categoryLabel}` : ''}
         </ThemedText>
         {item.memo ? <ThemedText type="small">{item.memo}</ThemedText> : null}
       </View>
@@ -111,7 +113,7 @@ function HistoryRow({ item }: { item: TransactionHistoryItem }) {
         <ThemedText>{formatHistoryAmount(item)}</ThemedText>
         {item.editable ? (
           <ThemedText type="small" themeColor="textSecondary">
-            {item.type === 'expense_cash' || item.type === 'expense_card' ? '編集 ›' : '詳細 ›'}
+            {item.type === 'expense_cash' || item.type === 'expense_card' || item.type === 'income' ? '編集 ›' : '詳細 ›'}
           </ThemedText>
         ) : null}
       </View>
@@ -123,7 +125,7 @@ function HistoryRow({ item }: { item: TransactionHistoryItem }) {
   return (
     <Pressable
       onPress={() =>
-        item.type === 'expense_cash' || item.type === 'expense_card'
+        item.type === 'expense_cash' || item.type === 'expense_card' || item.type === 'income'
           ? router.push({ pathname: '/input', params: { transactionId: item.id } })
           : router.push(`/transaction/${item.id}`)
       }>

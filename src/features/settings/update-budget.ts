@@ -41,6 +41,7 @@ export async function updateBudgetAndMonthlyRule(
       .from(recurringRules)
       .where(
         and(
+          eq(recurringRules.ruleKind, "budget_allocation"),
           eq(recurringRules.type, "income"),
           eq(recurringRules.toAccountId, accountId),
           eq(recurringRules.dayOfMonth, 1),
@@ -169,11 +170,13 @@ export async function updateBudgetAndMonthlyRule(
         // 旧データに生成済み/削除済みmarkerが1件だけあればIDを引き継ぎ、
         // 二重充当や削除済み取引の復活を防ぐ。
         id: orphan?.recurringRuleId ?? generateId(),
+        ruleKind: "budget_allocation",
         type: "income",
         amount: input.monthlyBudget,
         fromAccountId: null,
         toAccountId: accountId,
         cardId: null,
+        categoryId: null,
         memo: "月初充当",
         dayOfMonth: 1,
       };

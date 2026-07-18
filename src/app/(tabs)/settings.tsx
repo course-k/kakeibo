@@ -1,4 +1,4 @@
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useMemo, useState, type PropsWithChildren } from 'react';
 import { ActivityIndicator, Alert, Button, Pressable, ScrollView, Share, StyleSheet, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -7,11 +7,12 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { listAccounts } from '@/db/accounts-repository';
 import { listCards } from '@/db/cards-repository';
+import { insertCategory, listCategories, updateCategory } from '@/db/categories-repository';
 import { exportData, importData } from '@/db/export-import';
 import { useDb } from '@/db/provider';
 import { listRecurringRules } from '@/db/recurring-rules-repository';
 import { insertTransaction, listTransactions } from '@/db/transactions-repository';
-import type { Account, Card, RecurringRule, Transaction } from '@/domain/types';
+import type { Account, Card, Category, CategoryKind, RecurringRule, Transaction } from '@/domain/types';
 import { archiveBlockReason } from '@/features/settings/account-archive';
 import { createCardWithSettlementAccount, updateCardSettings } from '@/features/settings/cards';
 import { createBudgetWithMonthlyRule } from '@/features/settings/budgets';
@@ -20,7 +21,7 @@ import { reopenBudget } from '@/features/settings/reopen-budget';
 import { updateBudgetAndMonthlyRule } from '@/features/settings/update-budget';
 import { buildInitialBalanceAdjustment } from '@/features/settings/initial-balance';
 
-type SettingsSection = 'budgets' | 'cards' | 'balances' | 'backup';
+type SettingsSection = 'budgets' | 'categories' | 'cards' | 'balances' | 'backup';
 
 function today(): string {
   const now = new Date();
@@ -59,8 +60,10 @@ function displayAccountName(account: Account, cards: Card[]): string {
 
 export default function SettingsScreen() {
   const db = useDb();
+  const router = useRouter();
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [cards, setCards] = useState<Card[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
   const [rules, setRules] = useState<RecurringRule[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [loading, setLoading] = useState(true);
@@ -69,6 +72,10 @@ export default function SettingsScreen() {
   const [accountName, setAccountName] = useState('');
   const [accountBudget, setAccountBudget] = useState('');
   const [cardName, setCardName] = useState('');
+  const [categoryKind, setCategoryKind] = useState<CategoryKind>('expense');
+  const [categoryName, setCategoryName] = useState('');
+  const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
+  const [editingCategoryName, setEditingCategoryName] = useState('');
   const [cardClosingDay, setCardClosingDay] = useState('');
   const [cardDebitDay, setCardDebitDay] = useState('27');
   const [editingCardId, setEditingCardId] = useState<string | null>(null);
@@ -92,15 +99,17 @@ export default function SettingsScreen() {
   );
   const reload = useCallback(async () => {
     setLoading(true);
-    const [accountRows, cardRows, ruleRows, transactionRows] = await Promise.all([
+    const [accountRows, cardRows, categoryRows, ruleRows, transactionRows] = await Promise.all([
       listAccounts(db, { includeArchived: true }),
       listCards(db),
+      listCategories(db, { includeArchived: true }),
       listRecurringRules(db),
       listTransactions(db),
     ]);
     const availableAccounts = accountRows.filter((account) => account.archivedAt === null);
     setAccounts(accountRows);
     setCards(cardRows);
+    setCategories(categoryRows);
     setRules(ruleRows);
     setTransactions(transactionRows);
     setAdjustmentAccountId((current) =>
@@ -219,6 +228,61 @@ export default function SettingsScreen() {
       await reload();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'カードを追加できませんでした');
+    }
+  }
+
+  async function createCategory() {
+    try {
+      const sameKind = categories.filter((category) => category.kind === categoryKind);
+      await insertCategory(db, {
+        name: categoryName,
+        kind: categoryKind,
+        sortOrder: Math.max(-1, ...sameKind.map((category) => category.sortOrder)) + 1,
+      });
+      setCategoryName('');
+      setMessage('カテゴリを追加しました');
+      await reload();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'カテゴリを追加できませんでした');
+    }
+  }
+
+  async function saveCategoryEdit() {
+    if (!editingCategoryId) return;
+    try {
+      await updateCategory(db, editingCategoryId, { name: editingCategoryName });
+      setEditingCategoryId(null);
+      setEditingCategoryName('');
+      setMessage('カテゴリ名を更新しました');
+      await reload();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'カテゴリを更新できませんでした');
+    }
+  }
+
+  async function setCategoryActive(category: Category, active: boolean) {
+    try {
+      await updateCategory(db, category.id, { archivedAt: active ? null : today() });
+      setMessage(active ? 'カテゴリを再開しました' : 'カテゴリを無効にしました。過去の記録には残ります');
+      await reload();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'カテゴリを変更できませんでした');
+    }
+  }
+
+  async function moveCategory(category: Category, direction: -1 | 1) {
+    const siblings = categories
+      .filter((item) => item.kind === category.kind && item.archivedAt === null)
+      .sort((left, right) => left.sortOrder - right.sortOrder || left.name.localeCompare(right.name));
+    const index = siblings.findIndex((item) => item.id === category.id);
+    const other = siblings[index + direction];
+    if (!other) return;
+    try {
+      await updateCategory(db, category.id, { sortOrder: other.sortOrder });
+      await updateCategory(db, other.id, { sortOrder: category.sortOrder });
+      await reload();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '並び順を変更できませんでした');
     }
   }
 
@@ -416,6 +480,69 @@ export default function SettingsScreen() {
               </View>
             </View>
             ) : null}
+          </CollapsibleSection>
+
+          <CollapsibleSection
+            title="カテゴリ"
+            summary={`支出 ${categories.filter((category) => category.kind === 'expense' && category.archivedAt === null).length}件・収入 ${categories.filter((category) => category.kind === 'income' && category.archivedAt === null).length}件`}
+            open={openSection === 'categories'}
+            onPress={() => toggleSection('categories')}>
+            <ThemedText type="small" themeColor="textSecondary">
+              予算とは別に、レポートや履歴で使う収入・支出の分類を設定します。
+            </ThemedText>
+            <View style={styles.choices}>
+              <ChoiceButton label="支出カテゴリ" selected={categoryKind === 'expense'} onPress={() => setCategoryKind('expense')} />
+              <ChoiceButton label="収入カテゴリ" selected={categoryKind === 'income'} onPress={() => setCategoryKind('income')} />
+            </View>
+            <TextInput
+              style={styles.input}
+              value={categoryName}
+              onChangeText={setCategoryName}
+              placeholder={categoryKind === 'expense' ? '例: 外食' : '例: 給与'}
+            />
+            <Button title="カテゴリを追加" onPress={createCategory} />
+
+            <View style={styles.list}>
+              {categories
+                .filter((category) => category.kind === categoryKind)
+                .map((category) => (
+                  <View key={category.id} style={styles.row}>
+                    <View style={styles.rowText}>
+                      <ThemedText type="smallBold">{category.name}</ThemedText>
+                      {category.archivedAt ? (
+                        <ThemedText type="small" themeColor="textSecondary">無効（{category.archivedAt}）</ThemedText>
+                      ) : null}
+                    </View>
+                    {category.archivedAt ? (
+                      <Button title="再開" onPress={() => void setCategoryActive(category, true)} />
+                    ) : (
+                      <View style={styles.rowActions}>
+                        <Button title="↑" onPress={() => void moveCategory(category, -1)} />
+                        <Button title="↓" onPress={() => void moveCategory(category, 1)} />
+                        <Button
+                          title="編集"
+                          onPress={() => {
+                            setEditingCategoryId(category.id);
+                            setEditingCategoryName(category.name);
+                          }}
+                        />
+                        <Button title="無効" onPress={() => void setCategoryActive(category, false)} />
+                      </View>
+                    )}
+                  </View>
+                ))}
+            </View>
+            {editingCategoryId ? (
+              <View style={styles.subsection}>
+                <ThemedText type="smallBold">カテゴリ名を編集</ThemedText>
+                <TextInput style={styles.input} value={editingCategoryName} onChangeText={setEditingCategoryName} />
+                <View style={styles.rowActions}>
+                  <Button title="保存" onPress={saveCategoryEdit} />
+                  <Button title="キャンセル" onPress={() => setEditingCategoryId(null)} />
+                </View>
+              </View>
+            ) : null}
+            <Button title="毎月の定期記録を管理" onPress={() => router.push('/recurring')} />
           </CollapsibleSection>
 
           <CollapsibleSection

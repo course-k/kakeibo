@@ -14,7 +14,8 @@ export default function RootLayout() {
         <AnimatedSplashOverlay />
         <Stack screenOptions={{ headerShown: false }}>
           <Stack.Screen name="(tabs)" />
-          <Stack.Screen name="input" options={{ presentation: 'modal', headerShown: true }} />
+          <Stack.Screen name="input" options={{ presentation: 'modal', headerShown: true, title: '記録' }} />
+          <Stack.Screen name="recurring" options={{ headerShown: true, title: '定期記録' }} />
           <Stack.Screen name="transfer" options={{ presentation: 'modal', headerShown: true, title: '予算を移す' }} />
           <Stack.Screen name="card/[id]" options={{ headerShown: true }} />
           <Stack.Screen name="transaction/[id]" options={{ headerShown: true, title: '記録の詳細' }} />

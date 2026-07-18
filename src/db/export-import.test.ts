@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { insertAccount } from "./accounts-repository";
 import { insertCard } from "./cards-repository";
+import { insertCategory } from "./categories-repository";
 import { createNodeDatabase, createTestDb } from "./test-utils";
 import BetterSqlite3 from "better-sqlite3";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
@@ -47,12 +48,25 @@ describe("export-import 往復一致（不変条件6）", () => {
       closingDay: 15,
       debitDay: 27,
     });
+    const incomeCategory = await insertCategory(db, {
+      id: "salary",
+      name: "給与",
+      kind: "income",
+      sortOrder: 0,
+    });
+    const expenseCategory = await insertCategory(db, {
+      id: "groceries",
+      name: "食費",
+      kind: "expense",
+      sortOrder: 0,
+    });
     const rule = await insertRecurringRule(db, {
       type: "income",
       amount: 50000,
       fromAccountId: null,
       toAccountId: budget.id,
       cardId: null,
+      categoryId: incomeCategory.id,
       memo: "月初充当",
       dayOfMonth: 1,
     });
@@ -63,6 +77,7 @@ describe("export-import 往復一致（不変条件6）", () => {
       fromAccountId: null,
       toAccountId: budget.id,
       cardId: null,
+      categoryId: incomeCategory.id,
       memo: "初期入金",
       recurringRuleId: null,
     });
@@ -73,6 +88,7 @@ describe("export-import 往復一致（不変条件6）", () => {
       fromAccountId: budget.id,
       toAccountId: settlement.id,
       cardId: card.id,
+      categoryId: expenseCategory.id,
       memo: "スーパー",
       recurringRuleId: null,
     });
@@ -84,6 +100,7 @@ describe("export-import 往復一致（不変条件6）", () => {
       fromAccountId: budget.id,
       toAccountId: null,
       cardId: null,
+      categoryId: expenseCategory.id,
       memo: "取消予定",
       recurringRuleId: rule.id,
     });
@@ -103,6 +120,7 @@ describe("export-import 往復一致（不変条件6）", () => {
 
     expect(secondExport.accounts).toEqual(firstExport.accounts);
     expect(secondExport.cards).toEqual(firstExport.cards);
+    expect(secondExport.categories).toEqual(firstExport.categories);
     expect(secondExport.transactions).toEqual(firstExport.transactions);
     expect(secondExport.recurringRules).toEqual(firstExport.recurringRules);
     expect(
@@ -115,6 +133,7 @@ describe("export-import 往復一致（不変条件6）", () => {
     const thirdExport = await exportData(db);
     expect(thirdExport.accounts).toEqual(firstExport.accounts);
     expect(thirdExport.cards).toEqual(firstExport.cards);
+    expect(thirdExport.categories).toEqual(firstExport.categories);
     expect(thirdExport.transactions).toEqual(firstExport.transactions);
     expect(thirdExport.recurringRules).toEqual(firstExport.recurringRules);
 
@@ -159,6 +178,18 @@ describe("export-import 往復一致（不変条件6）", () => {
         name: "定期ルールの意味的不正",
         mutate: (data) => {
           data.recurringRules[0].fromAccountId = data.accounts[0].id;
+        },
+      },
+      {
+        name: "category参照切れ",
+        mutate: (data) => {
+          data.transactions[0].categoryId = "missing-category";
+        },
+      },
+      {
+        name: "category種別不一致",
+        mutate: (data) => {
+          data.transactions[0].categoryId = "expense-category";
         },
       },
       {
@@ -231,6 +262,26 @@ describe("export-import 往復一致（不変条件6）", () => {
           },
         ],
         cards: [],
+        categories: [
+          {
+            id: "income-category",
+            name: "給与",
+            kind: "income",
+            sortOrder: 0,
+            archivedAt: null,
+            createdAt: "2026-01-01T00:00:00.000Z",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          },
+          {
+            id: "expense-category",
+            name: "食費",
+            kind: "expense",
+            sortOrder: 0,
+            archivedAt: null,
+            createdAt: "2026-01-01T00:00:00.000Z",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          },
+        ],
         transactions: [
           {
             id: "tx",
@@ -240,6 +291,7 @@ describe("export-import 往復一致（不変条件6）", () => {
             fromAccountId: null,
             toAccountId: "budget",
             cardId: null,
+            categoryId: "income-category",
             memo: "月初充当",
             recurringRuleId: "rule",
             createdAt: "2026-07-01T00:00:00.000Z",
@@ -255,6 +307,7 @@ describe("export-import 往復一致（不変条件6）", () => {
             fromAccountId: null,
             toAccountId: "budget",
             cardId: null,
+            categoryId: "income-category",
             memo: "月初充当",
             dayOfMonth: 1,
           },
@@ -266,10 +319,98 @@ describe("export-import 往復一致（不変条件6）", () => {
       expect(await exportData(db), invalidCase.name).toMatchObject({
         accounts: before.accounts,
         cards: before.cards,
+        categories: before.categories,
         transactions: before.transactions,
         recurringRules: before.recurringRules,
       });
     }
+  });
+
+  it("v1 backup を migration と同じ category 規則で v2 に正規化する", async () => {
+    const db = createTestDb();
+    const timestamp = "2026-01-01T00:00:00.000Z";
+    const legacyV1 = {
+      schemaVersion: 1,
+      exportedAt: "2026-07-17T00:00:00.000Z",
+      accounts: [
+        {
+          id: "budget",
+          name: "生活費",
+          type: "budget",
+          monthlyBudget: 50000,
+          ownerId: null,
+          sortOrder: 3,
+          archivedAt: null,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        },
+      ],
+      cards: [],
+      transactions: [
+        {
+          id: "income",
+          date: "2026-07-01",
+          amount: 50000,
+          type: "income",
+          fromAccountId: null,
+          toAccountId: "budget",
+          cardId: null,
+          memo: "月初充当",
+          recurringRuleId: null,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          deletedAt: null,
+        },
+        {
+          id: "expense",
+          date: "2026-07-02",
+          amount: 1000,
+          type: "expense_cash",
+          fromAccountId: "budget",
+          toAccountId: null,
+          cardId: null,
+          memo: "食費",
+          recurringRuleId: "expense-rule",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          deletedAt: null,
+        },
+      ],
+      recurringRules: [
+        {
+          id: "expense-rule",
+          type: "expense_cash",
+          amount: 1000,
+          fromAccountId: "budget",
+          toAccountId: null,
+          cardId: null,
+          memo: "食費",
+          dayOfMonth: 2,
+        },
+      ],
+    };
+
+    await importData(db, legacyV1);
+    const upgraded = await exportData(db);
+
+    expect(upgraded.schemaVersion).toBe(2);
+    expect(upgraded.categories.map((category) => category.id).sort()).toEqual([
+      "default-expense-other",
+      "default-income-other",
+      "legacy-budget-budget",
+    ]);
+    expect(upgraded.categories.find((category) => category.id === "legacy-budget-budget")).toMatchObject({
+      name: "生活費",
+      kind: "expense",
+      sortOrder: 3,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+    expect(upgraded.transactions.find((transaction) => transaction.id === "expense")?.categoryId).toBe(
+      "legacy-budget-budget"
+    );
+    expect(upgraded.recurringRules[0].categoryId).toBe("legacy-budget-budget");
+    expect(upgraded.transactions.find((transaction) => transaction.id === "income")?.categoryId).toBeNull();
   });
 
   it("importData は取り込み境界で date / archivedAt をゼロ埋め正規化する（項目2の穴を突くケース）", async () => {
@@ -301,6 +442,17 @@ describe("export-import 往復一致（不変条件6）", () => {
         },
       ],
       cards: [],
+      categories: [
+        {
+          id: "income-category",
+          name: "給与",
+          kind: "income",
+          sortOrder: 0,
+          archivedAt: null,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
       transactions: [
         {
           id: "tx-denormalized",
@@ -310,6 +462,7 @@ describe("export-import 往復一致（不変条件6）", () => {
           fromAccountId: null,
           toAccountId: budget.id,
           cardId: null,
+          categoryId: "income-category",
           memo: "",
           // 生成後に元ルールを削除した正常データ。recurring_rules に FK は持たない。
           recurringRuleId: "deleted-rule",
@@ -372,6 +525,7 @@ describe("export-import 往復一致（不変条件6）", () => {
         },
       ],
       cards: [],
+      categories: [],
       transactions: [],
       recurringRules: [],
     };
